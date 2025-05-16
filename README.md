@@ -12,6 +12,8 @@ cd kubernetes-installer
 
 **Run Ansible Installation - Standalone DEV K8S Cluster**
 
+ansible-playbook k8s-redhat-regenerate-cert.yml
+
 ansible-playbook k8s-redhat-playbook.yml
 
 
