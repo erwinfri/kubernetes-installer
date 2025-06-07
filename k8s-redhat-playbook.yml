@@ -29,7 +29,20 @@
 - name: Install Kubernetes on Red Hat 9
   hosts: localhost
   become: yes
+
+  vars_prompt:
+    - name: "k8s_hostname"
+      prompt: "Enter the hostname for this Kubernetes node"
+      private: no
+      default: "k8s.modernhackers.com"
+
   tasks:
+    
+    # Set hostname to user input or default value
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ k8s_hostname }}"
+    
     # Disable swap
     - name: Disable swap
       ansible.builtin.command:

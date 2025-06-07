@@ -1,0 +1,51 @@
+---
+- name: Install KubeVirt on existing Kubernetes node
+  hosts: localhost
+  become: yes
+  vars:
+    kubevirt_version: v1.2.0
+    kubevirt_namespace: kubevirt
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    - name: Ensure pip3 is installed
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+
+    - name: Ensure kubernetes Python package is installed
+      ansible.builtin.pip:
+        name: kubernetes
+        executable: pip3
+   
+    - name: Ensure kubectl is installed
+      ansible.builtin.command: which kubectl
+      register: kubectl_check
+      failed_when: kubectl_check.rc != 0
+      changed_when: false
+
+    - name: Create KubeVirt namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ kubevirt_namespace }}"
+        state: present
+
+    - name: Deploy KubeVirt Operator
+      kubernetes.core.k8s:
+        state: present
+        src: "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-operator.yaml"
+
+    - name: Deploy KubeVirt CustomResource
+      kubernetes.core.k8s:
+        state: present
+        src: "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-cr.yaml"
+
+    - name: Wait for KubeVirt pods to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ kubevirt_namespace }}"
+      register: kubevirt_pods
+      until: kubevirt_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+      retries: 20
+      delay: 15
