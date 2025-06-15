@@ -158,7 +158,12 @@
     - name: Reset Kubernetes cluster
       ansible.builtin.command:
         cmd: kubeadm reset -f
+      register: kubeadm_reset_output
       ignore_errors: true
+        
+    - name: Show kubeadm reset output (pretty lines)
+      ansible.builtin.debug:
+        msg: "{{ kubeadm_reset_output.stdout.split('\n') }}"
 
     - name: Remove leftover Kubernetes configuration
       ansible.builtin.file:
@@ -190,6 +195,30 @@
       ansible.builtin.command:
         cmd: kubeadm init --pod-network-cidr=10.244.0.0/16 --kubernetes-version v1.33.0
       register: kubeadm_output
+
+    #- name: Show kubeadm init output (pretty lines)
+    #  ansible.builtin.debug:
+    #    msg: "{{ kubeadm_output.stdout.split('\n') }}"
+
+    - name: Split kubeadm init output into lines
+      set_fact:
+        kubeadm_init_lines: "{{ kubeadm_output.stdout.split('\n') }}"
+
+    - name: Extract cluster initialization instructions (from success message to end)
+      set_fact:
+        kubeadm_init_instructions: >-
+          {{
+            kubeadm_init_lines[
+              (kubeadm_init_lines | map('trim') | list).index('Your Kubernetes control-plane has initialized successfully!')
+              if 'Your Kubernetes control-plane has initialized successfully!' in (kubeadm_init_lines | map('trim') | list)
+              else (kubeadm_init_lines | length)
+            :
+            ]
+          }}
+
+    - name: Show cluster initialization instructions
+      ansible.builtin.debug:
+        msg: "{{ kubeadm_init_instructions }}"
 
     # Set up kubeconfig for root user
     - name: Set up kubeconfig for root user

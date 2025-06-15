@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: virtctl-console-access
+  namespace: kubevirt
+rules:
+- apiGroups: ["subresources.kubevirt.io"]
+  resources: ["virtualmachineinstances/console"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: virtctl-console-access
+  namespace: kubevirt
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: kubevirt
+roleRef:
+  kind: Role
+  name: virtctl-console-access
+  apiGroup: rbac.authorization.k8s.io
