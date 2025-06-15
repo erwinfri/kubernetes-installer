@@ -1,0 +1,194 @@
+ ansible-playbook k8s-redhat-playbook.yml
+[WARNING]: No inventory was parsed, only implicit localhost is available
+[WARNING]: provided hosts list is empty, only localhost is available. Note that the implicit localhost does not match 'all'
+Enter the hostname for this Kubernetes node [k8s.modernhackers.com]: k8s-kubevirt.modernhackers.com
+
+PLAY [Install Kubernetes on Red Hat 9] ************************************************************************************************************************************************************************
+
+TASK [Gathering Facts] ****************************************************************************************************************************************************************************************
+ok: [localhost]
+
+TASK [Set hostname] *******************************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Disable swap] *******************************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Comment out swap entry in /etc/fstab] *******************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Set SELinux to permissive mode] *************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Update SELinux configuration to permissive] *************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Load br_netfilter kernel module] ************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Persist br_netfilter kernel module] *********************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Configure sysctl parameters for Kubernetes networking] **************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Apply sysctl parameters] ********************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Add Kubernetes repository] ******************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Install Kubernetes components] **************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Enable and start kubelet] *******************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Install required packages for containerd] ***************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Add Docker repository] **********************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Install containerd] *************************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Configure containerd] ***********************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Enable SystemdCgroup in containerd] *********************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Restart containerd] *************************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Reset Kubernetes cluster] *******************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Show kubeadm reset output (pretty lines)] ***************************************************************************************************************************************************************
+ok: [localhost] => {
+    "msg": [
+        "[preflight] Running pre-flight checks",
+        "[reset] Deleted contents of the etcd data directory: /var/lib/etcd",
+        "[reset] Stopping the kubelet service",
+        "[reset] Unmounting mounted directories in \"/var/lib/kubelet\"",
+        "[reset] Deleting contents of directories: [/etc/kubernetes/manifests /var/lib/kubelet /etc/kubernetes/pki]",
+        "[reset] Deleting files: [/etc/kubernetes/admin.conf /etc/kubernetes/super-admin.conf /etc/kubernetes/kubelet.conf /etc/kubernetes/bootstrap-kubelet.conf /etc/kubernetes/controller-manager.conf /etc/kubernetes/scheduler.conf]",
+        "",
+        "The reset process does not perform cleanup of CNI plugin configuration,",
+        "network filtering rules and kubeconfig files.",
+        "",
+        "For information on how to perform this cleanup manually, please see:",
+        "    https://k8s.io/docs/reference/setup-tools/kubeadm/kubeadm-reset/"
+    ]
+}
+
+TASK [Remove leftover Kubernetes configuration] ***************************************************************************************************************************************************************
+changed: [localhost] => (item=/etc/kubernetes)
+ok: [localhost] => (item=/var/lib/etcd)
+
+TASK [Open firewall ports for Kubernetes] *********************************************************************************************************************************************************************
+changed: [localhost] => (item=6443/tcp)
+changed: [localhost] => (item=10250/tcp)
+changed: [localhost] => (item=2379-2380/tcp)
+changed: [localhost] => (item=8472/udp)
+changed: [localhost] => (item=4789/udp)
+
+TASK [Reload firewalld] ***************************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Initialize Kubernetes cluster] **************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Split kubeadm init output into lines] *******************************************************************************************************************************************************************
+ok: [localhost]
+
+TASK [Extract cluster initialization instructions (from success message to end)] ******************************************************************************************************************************
+ok: [localhost]
+
+TASK [Show cluster initialization instructions] ***************************************************************************************************************************************************************
+ok: [localhost] => {
+    "msg": [
+        "Your Kubernetes control-plane has initialized successfully!",
+        "",
+        "To start using your cluster, you need to run the following as a regular user:",
+        "",
+        "  mkdir -p $HOME/.kube",
+        "  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config",
+        "  sudo chown $(id -u):$(id -g) $HOME/.kube/config",
+        "",
+        "Alternatively, if you are the root user, you can run:",
+        "",
+        "  export KUBECONFIG=/etc/kubernetes/admin.conf",
+        "",
+        "You should now deploy a pod network to the cluster.",
+        "Run \"kubectl apply -f [podnetwork].yaml\" with one of the options listed at:",
+        "  https://kubernetes.io/docs/concepts/cluster-administration/addons/",
+        "",
+        "Then you can join any number of worker nodes by running the following on each as root:",
+        "",
+        "kubeadm join 192.168.1.135:6443 --token s4o02m.q9yjszcm9hvqvgbf \\",
+        "\t--discovery-token-ca-cert-hash sha256:60e0930ce77e724f6c305d2d94b73550fd8af71d2d3ce2a28757d0841e5f3ece "
+    ]
+}
+
+TASK [Set up kubeconfig for root user] ************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Copy admin.conf to kubeconfig] **************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Verify kubelet service is running] **********************************************************************************************************************************************************************
+ok: [localhost]
+
+TASK [Verify Kubernetes API server is running] ****************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Install Flannel CNI plugin] *****************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Wait for Flannel DaemonSet to be created] ***************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Wait for Flannel pods to be ready] **********************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Debug Flannel DaemonSet] ********************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Print Flannel DaemonSet status] *************************************************************************************************************************************************************************
+ok: [localhost] => {
+    "flannel_daemonset_debug.stdout": "NAME              DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE\nkube-flannel-ds   1         1         1       1            1           <none>          11s"
+}
+
+TASK [Fetch Flannel pod logs] *********************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Print Flannel pod logs] *********************************************************************************************************************************************************************************
+ok: [localhost] => {
+    "flannel_logs.stdout": "W0615 11:25:52.565368       1 main.go:568] no subnet found for key: FLANNEL_IPV6_SUBNET in file: /run/flannel/subnet.env\nI0615 11:25:52.565375       1 iptables.go:100] Current network or subnet (10.244.0.0/16, 10.244.0.0/24) is not equal to previous one (0.0.0.0/0, 0.0.0.0/0), trying to recycle old iptables rules\nI0615 11:25:52.624685       1 iptables.go:110] Setting up masking rules\nI0615 11:25:52.634964       1 iptables.go:211] Changing default FORWARD chain policy to ACCEPT\nI0615 11:25:52.640199       1 main.go:423] Wrote subnet file to /run/flannel/subnet.env\nI0615 11:25:52.640292       1 main.go:427] Running backend.\nI0615 11:25:52.640786       1 vxlan_network.go:65] watching for new subnet leases\nI0615 11:25:52.654054       1 main.go:448] Waiting for all goroutines to exit\nI0615 11:25:52.668440       1 iptables.go:357] bootstrap done\nI0615 11:25:52.701536       1 iptables.go:357] bootstrap done"
+}
+
+TASK [Allow control-plane node to run workloads] **************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Wait for Kubernetes node to become Ready] ***************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Debug Kubernetes node status] ***************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Debug Kubernetes pod status] ****************************************************************************************************************************************************************************
+changed: [localhost]
+
+TASK [Set up kubeconfig for the current user] *****************************************************************************************************************************************************************
+changed: [localhost]
+
+PLAY RECAP ****************************************************************************************************************************************************************************************************
+localhost                  : ok=44   changed=36   unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+
+
+[mazsola@k8s-kubevirt ~]$ kubectl get nodes
+NAME                             STATUS   ROLES           AGE     VERSION
+k8s-kubevirt.modernhackers.com   Ready    control-plane   3m34s   v1.33.0
+
