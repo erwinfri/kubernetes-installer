@@ -1,0 +1,144 @@
+# Windows Server 2019 Status Tasks (moved from top-level)
+# Controller remains top-level.
+
+---
+# Windows Server 2019 Status and Management Module
+# This module provides status checking and basic management operations
+
+- name: Display Windows Server status information
+  ansible.builtin.debug:
+    msg:
+      - "📊 Windows Server 2019 Status Check"
+      - "VM Name: {{ vm_name }}"
+      - "Namespace: {{ kubevirt_namespace }}"
+
+- name: Check VM resources
+  block:
+    - name: Check VirtualMachine
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: vm_info
+
+    - name: Check VirtualMachineInstance
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: vmi_info
+
+    - name: Check VM Pod
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ kubevirt_namespace }}"
+        label_selectors:
+          - "kubevirt.io/vm={{ vm_name }}"
+      register: pod_info
+
+- name: Check storage resources
+  block:
+    - name: Check PersistentVolumes
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item }}"
+      register: pv_info
+      loop:
+        - win2019server-system-pv
+        - win2019server-iso-pv
+        - win2019server-unattend-pv
+      ignore_errors: true
+
+    - name: Check PersistentVolumeClaims
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: pvc_info
+      loop:
+        - win2019server-system-pvc
+        - win2019server-iso-pvc
+        - win2019server-unattend-pvc
+      ignore_errors: true
+
+- name: Check access services
+  block:
+    - name: Check Services
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: "{{ item }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: service_info
+      loop:
+        - win2019server-vnc
+      ignore_errors: true
+
+- name: Check storage files
+  block:
+    - name: Check storage directories and files
+      tags: [fast_status]
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: no   # Avoid reading entire large disk image files
+        get_md5: no
+        get_mime: no
+      register: storage_files
+      loop:
+        - "{{ storage_dir }}/win2019server-system-disk/disk.img"
+        - "{{ storage_dir }}/win2019server-iso/disk.img"
+        - "{{ storage_dir }}/win2019server-unattend/disk.img"
+        - "{{ storage_dir }}/unattend.xml"
+
+- name: Display comprehensive status
+  ansible.builtin.debug:
+    msg: |
+      🔍 Windows Server 2019 Complete Status Report
+
+      💻 Virtual Machine:
+        Status: {{ vm_info.resources[0].status.printableStatus | default('NOT FOUND') if vm_info.resources | length > 0 else 'NOT FOUND' }}
+        Ready: {{ vm_info.resources[0].status.ready | default('N/A') if vm_info.resources | length > 0 else 'N/A' }}
+        Created: {{ vm_info.resources[0].metadata.creationTimestamp | default('N/A') if vm_info.resources | length > 0 else 'N/A' }}
+
+      🏃 Virtual Machine Instance:
+        Phase: {{ vmi_info.resources[0].status.phase | default('NOT FOUND') if vmi_info.resources | length > 0 else 'NOT FOUND' }}
+        Node: {{ vmi_info.resources[0].status.nodeName | default('N/A') if vmi_info.resources | length > 0 else 'N/A' }}
+        IP Address: {{ vmi_info.resources[0].status.interfaces[0].ipAddress | default('N/A') if (vmi_info.resources | length > 0 and vmi_info.resources[0].status.interfaces is defined and vmi_info.resources[0].status.interfaces | length > 0) else 'N/A' }}
+        Ready: {{ (vmi_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first | default('N/A')) if vmi_info.resources | length > 0 else 'N/A' }}
+
+      🐳 Pod Status:
+        Pod Phase: {{ pod_info.resources[0].status.phase | default('NOT FOUND') if pod_info.resources | length > 0 else 'NOT FOUND' }}
+        Pod Name: {{ pod_info.resources[0].metadata.name | default('N/A') if pod_info.resources | length > 0 else 'N/A' }}
+        Containers Ready: {{ (pod_info.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list | length) ~ '/' ~ (pod_info.resources[0].status.containerStatuses | length) if pod_info.resources | length > 0 else 'N/A' }}
+
+      💾 Storage Resources:
+        System PV: {{ 'BOUND' if (pv_info.results[0].resources | length > 0 and pv_info.results[0].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+        ISO PV: {{ 'BOUND' if (pv_info.results[1].resources | length > 0 and pv_info.results[1].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+        Unattend PV: {{ 'BOUND' if (pv_info.results[2].resources | length > 0 and pv_info.results[2].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+        System PVC: {{ 'BOUND' if (pvc_info.results[0].resources | length > 0 and pvc_info.results[0].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+        ISO PVC: {{ 'BOUND' if (pvc_info.results[1].resources | length > 0 and pvc_info.results[1].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+        Unattend PVC: {{ 'BOUND' if (pvc_info.results[2].resources | length > 0 and pvc_info.results[2].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
+
+      📁 Storage Files:
+        System Disk: {{ 'EXISTS (' ~ ((storage_files.results[0].stat.size | default(0) / 1024 / 1024 / 1024) | round(2) | string) ~ ' GB)' if storage_files.results[0].stat.exists else 'MISSING' }}
+        ISO File: {{ 'EXISTS (' ~ ((storage_files.results[1].stat.size | default(0) / 1024 / 1024 / 1024) | round(2) | string) ~ ' GB)' if storage_files.results[1].stat.exists else 'MISSING' }}
+        Unattend ISO: {{ 'EXISTS (' ~ ((storage_files.results[2].stat.size | default(0) / 1024) | round(2) | string) ~ ' KB)' if storage_files.results[2].stat.exists else 'MISSING' }}
+        Unattend XML: {{ 'EXISTS' if storage_files.results[3].stat.exists else 'MISSING' }}
+
+      {% set vnc_res = (service_info.results | selectattr('item','equalto','win2019server-vnc') | list) %}
+      🌐 Access Services:
+        VNC Service: {{ 'AVAILABLE (NodePort ' ~ (vnc_res[0].resources[0].spec.ports[0].nodePort | string) ~ ')' if (vnc_res|length>0 and vnc_res[0].resources|length>0) else 'MISSING' }}
+
+      🔗 Access Commands:
+        VNC Console: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}
+        Serial Console: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}
+
+      🛠 Management Commands:
+        Start: virtctl start {{ vm_name }} -n {{ kubevirt_namespace }}
+        Stop: virtctl stop {{ vm_name }} -n {{ kubevirt_namespace }}
+        Restart: virtctl restart {{ vm_name }} -n {{ kubevirt_namespace }}
