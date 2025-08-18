@@ -1,0 +1,201 @@
+---
+# Kubernetes Install Tasks (to be included by controller)
+# Assumes localhost context.
+
+- name: Set base packages list
+  ansible.builtin.set_fact:
+    k8s_base_packages:
+      - curl
+      - wget
+      - vim
+      - git
+      - net-tools
+      - bind-utils
+      - iptables-services
+      - bash-completion
+      - iproute
+      - tar
+      - jq
+
+- name: Remove legacy kubernetes repo definition if present
+  ansible.builtin.file:
+    path: /etc/yum.repos.d/kubernetes.repo
+    state: absent
+
+- name: Prompt for hostname (only once)
+  ansible.builtin.pause:
+    prompt: "Enter the hostname for this Kubernetes node (default: k8s.modernhackers.com)"
+  register: k8s_host_prompt
+  when: k8s_hostname is not defined
+
+- name: Set default hostname if not provided
+  ansible.builtin.set_fact:
+    k8s_hostname: "{{ (k8s_host_prompt.user_input | default('')) | ternary(k8s_host_prompt.user_input, 'k8s.modernhackers.com') }}"
+  when: k8s_hostname is not defined
+
+- name: Disable SELinux
+  ansible.posix.selinux:
+    state: disabled
+
+- name: Stop and disable firewalld
+  ansible.builtin.service:
+    name: firewalld
+    state: stopped
+    enabled: no
+
+- name: Install required packages
+  ansible.builtin.dnf:
+    name: "{{ k8s_base_packages }}"
+    state: present
+
+# Add kernel module configuration before network setup
+- name: Ensure kernel modules config present
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: '0644'
+
+- name: Load kernel modules immediately
+  ansible.builtin.shell: |
+    modprobe overlay || true
+    modprobe br_netfilter || true
+  changed_when: false
+
+- name: Configure sysctl for Kubernetes networking
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes-cri.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+    mode: '0644'
+
+- name: Apply sysctl settings
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+- name: Disable swap
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb | int > 0
+
+- name: Remove swap entry from fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^.*swap.*$'
+    replace: ''
+  when: ansible_swaptotal_mb | int > 0
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ k8s_hostname }}"
+
+- name: Update /etc/hosts with hostname entry
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ ansible_default_ipv4.address }} {{ k8s_hostname }}"
+    state: present
+
+# Replace legacy Google yum repo with new pkgs.k8s.io repo
+- name: Configure Kubernetes repository (pkgs.k8s.io)
+  ansible.builtin.yum_repository:
+    name: kubernetes
+    description: Kubernetes
+    baseurl: "https://pkgs.k8s.io/core:/stable:/v1.30/rpm/"
+    enabled: yes
+    gpgcheck: yes
+    repo_gpgcheck: yes
+    gpgkey: https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+
+# Install container runtime (containerd)
+- name: Install containerd
+  ansible.builtin.dnf:
+    name: containerd.io
+    state: present
+  ignore_errors: true
+
+- name: Ensure containerd config exists
+  ansible.builtin.shell: |
+    test -f /etc/containerd/config.toml || (mkdir -p /etc/containerd && containerd config default > /etc/containerd/config.toml)
+  changed_when: false
+  ignore_errors: true
+
+- name: Enable and start containerd
+  ansible.builtin.systemd:
+    name: containerd
+    enabled: true
+    state: started
+  ignore_errors: true
+
+- name: Install Kubernetes components
+  ansible.builtin.dnf:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: latest
+    disable_excludes: kubernetes
+
+- name: Enable and start kubelet
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: yes
+    state: started
+
+- name: Initialize Kubernetes cluster (single-node)
+  ansible.builtin.command: kubeadm init --pod-network-cidr=192.168.0.0/16
+  register: kubeadm_init
+  args:
+    creates: /etc/kubernetes/admin.conf
+
+- name: Configure kubectl for the root user
+  ansible.builtin.shell: |
+    mkdir -p /root/.kube
+    cp -i /etc/kubernetes/admin.conf /root/.kube/config
+    chown $(id -u):$(id -g) /root/.kube/config
+  args:
+    creates: /root/.kube/config
+
+- name: Install Calico network plugin
+  ansible.builtin.command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+  register: calico_apply
+  changed_when: "calico_apply.rc == 0"
+
+- name: Wait for node to be Ready
+  ansible.builtin.shell: |
+    kubectl get nodes --no-headers | awk '{print $2}' | grep -q "Ready"
+  register: node_ready_check
+  retries: 30
+  delay: 10
+  until: node_ready_check.rc == 0
+  changed_when: false
+
+- name: Remove taint from control-plane node
+  ansible.builtin.command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+  register: taint_remove
+  failed_when: false
+
+- name: Display cluster info
+  ansible.builtin.command: kubectl cluster-info
+  register: cluster_info
+  changed_when: false
+
+- name: Display nodes in cluster
+  ansible.builtin.command: kubectl get nodes -o wide
+  register: nodes_out
+  changed_when: false
+
+- name: Display pods in all namespaces
+  ansible.builtin.command: kubectl get pods --all-namespaces
+  register: pods_out
+  changed_when: false
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "✅ Kubernetes installation complete."
+      - "Hostname: {{ k8s_hostname }}"
+      - "Init outcome: {{ 'ok' if kubeadm_init.rc == 0 else 'skipped/failed' }}"
+      - "Node Ready state confirmed."
+

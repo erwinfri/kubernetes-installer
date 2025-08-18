@@ -1,0 +1,88 @@
+---
+# Windows Server 2019 Modular Deployment Controller
+# Usage: ansible-playbook windows-server-controller.yaml -e action=install|uninstall|reinstall|status
+- name: Windows Server 2019 Modular Deployment Controller
+  hosts: localhost
+  become: yes
+  vars:
+    action: "{{ action | default('install') }}"
+    kubevirt_namespace: kubevirt
+    vm_name: win2019server
+    iso_path: /root/win2019server.iso
+    system_disk_size: 50Gi
+    iso_size: 6Gi
+    vm_memory: 4Gi
+    vm_cpu_cores: 2
+    storage_dir: /var/lib/kubevirt
+    windows_admin_password: "{{ admin_password | default('SecureP@ssw0rd!') }}"
+    windows_product_key: "{{ product_key | default('') }}"
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+    - name: Display action being performed
+      ansible.builtin.debug:
+        msg:
+          - "🎯 Windows Server 2019 Modular Deployment Controller"
+          - "Action: {{ action | upper }}"
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ kubevirt_namespace }}"
+
+    - name: Validate action parameter
+      ansible.builtin.fail:
+        msg: "Invalid action '{{ action }}'. Must be one of: install, uninstall, reinstall, status"
+      when: action not in ['install', 'uninstall', 'reinstall', 'status']
+
+    # Install Action
+    - name: Execute Windows Server installation
+      ansible.builtin.include_tasks: windows-server/windows-server-install.yaml
+      tags:
+        - install
+        - windows_install
+        - access_services
+      when: action == 'install'
+
+    # Uninstall Action
+    - name: Execute Windows Server uninstallation
+      ansible.builtin.include_tasks: windows-server/windows-server-uninstall.yaml
+      when: action == 'uninstall'
+
+    # Status Action
+    - name: Execute Windows Server status check
+      ansible.builtin.include_tasks: windows-server/windows-server-status.yaml
+      tags:
+        - status
+        - fast_status
+      when: action == 'status'
+
+    # Reinstall Action (uninstall then install)
+    - name: Execute Windows Server reinstallation
+      block:
+        - name: Display reinstall information
+          ansible.builtin.debug:
+            msg: "🔄 Starting reinstall process - uninstall followed by install"
+        - name: Execute uninstall phase
+          ansible.builtin.include_tasks: windows-server/windows-server-uninstall.yaml
+        - name: Wait between uninstall and install
+          ansible.builtin.debug:
+            msg: "⏳ Waiting 15 seconds between uninstall and install phases..."
+        - name: Pause for cleanup
+          ansible.builtin.wait_for:
+            timeout: 15
+        - name: Execute install phase
+          ansible.builtin.include_tasks: windows-server/windows-server-install.yaml
+      when: action == 'reinstall'
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg:
+          - "✅ Windows Server 2019 {{ action | upper }} completed successfully!"
+          - ""
+          - "Available actions:"
+          - "  - Install:    ansible-playbook windows-server-controller.yaml -e action=install"
+          - "  - Uninstall:  ansible-playbook windows-server-controller.yaml -e action=uninstall" 
+          - "  - Reinstall:  ansible-playbook windows-server-controller.yaml -e action=reinstall"
+          - "  - Status:     ansible-playbook windows-server-controller.yaml -e action=status"
+          - ""
+          - "Custom options:"
+          - "  - Custom password: -e admin_password='YourPassword!'"
+          - "  - Product key:     -e product_key='XXXXX-XXXXX-XXXXX-XXXXX-XXXXX'"
