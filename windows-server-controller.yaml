@@ -8,11 +8,19 @@
     action: "{{ action | default('install') }}"
     kubevirt_namespace: kubevirt
     vm_name: win2019server
-    iso_path: /root/win2019server.iso
-    system_disk_size: 50Gi
-    iso_size: 6Gi
-    vm_memory: 4Gi
-    vm_cpu_cores: 2
+    vhd_path: /root/win2019server.vhd
+    system_disk_size: "25Gi"
+    installer_disk_size: "12Gi"
+    vm_memory: 8Gi
+    vm_cpu_cores: 4
+    # CPU model control:
+    # - host-model (default here): approximates host CPU while keeping migration compatibility
+    # - host-passthrough: exposes full host CPU (best performance, no live migration compatibility)
+    # - Or an explicit model name (e.g. Skylake-Server-IBRS, Cascadelake-Server, EPYC-Rome, Nehalem)
+    vm_cpu_model: host-model
+    # Optional topology (adjust if you want a specific sockets/cores/threads layout)
+    vm_cpu_sockets: 1
+    vm_cpu_threads: 1
     storage_dir: /var/lib/kubevirt
     windows_admin_password: "{{ admin_password | default('SecureP@ssw0rd!') }}"
     windows_product_key: "{{ product_key | default('') }}"

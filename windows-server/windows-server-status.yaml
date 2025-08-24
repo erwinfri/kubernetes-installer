@@ -39,6 +39,33 @@
           - "kubevirt.io/vm={{ vm_name }}"
       register: pod_info
 
+- name: Inspect DNS chain (pod resolv.conf and CoreDNS)
+  block:
+    - name: Locate virt-launcher pod name
+      ansible.builtin.set_fact:
+        virtlauncher_pod: "{{ pod_info.resources[0].metadata.name }}"
+      when: pod_info.resources | length > 0
+
+    - name: Read /etc/resolv.conf from VM pod
+      ansible.builtin.shell: |
+        if [ -n "{{ virtlauncher_pod | default('') }}" ]; then
+          kubectl -n {{ kubevirt_namespace }} exec {{ virtlauncher_pod }} -c compute -- cat /etc/resolv.conf 2>/dev/null || echo "Failed to read resolv.conf"
+        else
+          echo "Pod not found"
+        fi
+      register: pod_resolvconf
+      when: virtlauncher_pod is defined
+      ignore_errors: true
+
+    - name: Get CoreDNS service (kube-dns)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: kube-dns
+        namespace: kube-system
+      register: kube_dns_svc
+      ignore_errors: true
+
 - name: Check storage resources
   block:
     - name: Check PersistentVolumes
@@ -49,8 +76,7 @@
       register: pv_info
       loop:
         - win2019server-system-pv
-        - win2019server-iso-pv
-        - win2019server-unattend-pv
+        - win2019server-virtio-iso-pv
       ignore_errors: true
 
     - name: Check PersistentVolumeClaims
@@ -62,9 +88,17 @@
       register: pvc_info
       loop:
         - win2019server-system-pvc
-        - win2019server-iso-pvc
-        - win2019server-unattend-pvc
+        - win2019server-virtio-iso-pvc
       ignore_errors: true
+
+- name: Check sysprep secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: win2019server-sysprep
+    namespace: "{{ kubevirt_namespace }}"
+  register: sysprep_secret
+  ignore_errors: true
 
 - name: Check access services
   block:
@@ -91,9 +125,8 @@
       register: storage_files
       loop:
         - "{{ storage_dir }}/win2019server-system-disk/disk.img"
-        - "{{ storage_dir }}/win2019server-iso/disk.img"
-        - "{{ storage_dir }}/win2019server-unattend/disk.img"
-        - "{{ storage_dir }}/unattend.xml"
+        - "{{ storage_dir }}/win2019server-virtio-iso/disk.img"
+        - "{{ storage_dir }}/Autounattend.xml"
 
 - name: Display comprehensive status
   ansible.builtin.debug:
@@ -119,16 +152,12 @@
       💾 Storage Resources:
         System PV: {{ 'BOUND' if (pv_info.results[0].resources | length > 0 and pv_info.results[0].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
         ISO PV: {{ 'BOUND' if (pv_info.results[1].resources | length > 0 and pv_info.results[1].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
-        Unattend PV: {{ 'BOUND' if (pv_info.results[2].resources | length > 0 and pv_info.results[2].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
         System PVC: {{ 'BOUND' if (pvc_info.results[0].resources | length > 0 and pvc_info.results[0].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
         ISO PVC: {{ 'BOUND' if (pvc_info.results[1].resources | length > 0 and pvc_info.results[1].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
-        Unattend PVC: {{ 'BOUND' if (pvc_info.results[2].resources | length > 0 and pvc_info.results[2].resources[0].status.phase == 'Bound') else 'NOT BOUND/MISSING' }}
-
-      📁 Storage Files:
+        Sysprep Secret: {{ 'PRESENT' if (sysprep_secret.resources | default([]) | length) > 0 else 'MISSING' }}      📁 Storage Files:
         System Disk: {{ 'EXISTS (' ~ ((storage_files.results[0].stat.size | default(0) / 1024 / 1024 / 1024) | round(2) | string) ~ ' GB)' if storage_files.results[0].stat.exists else 'MISSING' }}
         ISO File: {{ 'EXISTS (' ~ ((storage_files.results[1].stat.size | default(0) / 1024 / 1024 / 1024) | round(2) | string) ~ ' GB)' if storage_files.results[1].stat.exists else 'MISSING' }}
-        Unattend ISO: {{ 'EXISTS (' ~ ((storage_files.results[2].stat.size | default(0) / 1024) | round(2) | string) ~ ' KB)' if storage_files.results[2].stat.exists else 'MISSING' }}
-        Unattend XML: {{ 'EXISTS' if storage_files.results[3].stat.exists else 'MISSING' }}
+        Autounattend XML: {{ 'EXISTS' if storage_files.results[2].stat.exists else 'MISSING' }}
 
       {% set vnc_res = (service_info.results | selectattr('item','equalto','win2019server-vnc') | list) %}
       🌐 Access Services:
@@ -142,3 +171,12 @@
         Start: virtctl start {{ vm_name }} -n {{ kubevirt_namespace }}
         Stop: virtctl stop {{ vm_name }} -n {{ kubevirt_namespace }}
         Restart: virtctl restart {{ vm_name }} -n {{ kubevirt_namespace }}
+
+- name: Display DNS forwarding chain
+  ansible.builtin.debug:
+    msg:
+      - "🌐 DNS Chain Diagnostics"
+      - "In-VM resolver: 10.0.2.1 (KubeVirt dnsmasq)"
+      - "Pod upstream resolv.conf:"
+      - "{{ (pod_resolvconf.stdout | default('N/A')) }}"
+      - "CoreDNS (kube-dns) ClusterIP: {{ kube_dns_svc.resources[0].spec.clusterIP | default('N/A') if kube_dns_svc.resources | length > 0 else 'N/A' }}"
