@@ -7,17 +7,17 @@
 
 - name: Pre-flight checks
   block:
-    - name: Check if Windows Server 2019 ISO file exists
+    - name: Check if Windows Server 2019 VHD file exists
       ansible.builtin.stat:
-        path: "{{ iso_path }}"
-      register: iso_file_check
-      failed_when: not iso_file_check.stat.exists
+        path: "{{ vhd_path | default('/root/win2019server.vhd') }}"
+      register: vhd_file_check
+      failed_when: not vhd_file_check.stat.exists
 
-    - name: Display ISO file information
+    - name: Display VHD file information
       ansible.builtin.debug:
         msg:
-          - "Windows Server 2019 ISO found: {{ iso_path }}"
-          - "Size: {{ (iso_file_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
+          - "Windows Server 2019 VHD found: {{ vhd_path | default('/root/win2019server.vhd') }}"
+          - "Size: {{ (vhd_file_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
 
     - name: Ensure KubeVirt namespace exists
       kubernetes.core.k8s:
@@ -33,7 +33,7 @@
         name: kubevirt
         namespace: "{{ kubevirt_namespace }}"
       register: kubevirt_status
-      failed_when: 
+      failed_when:
         - kubevirt_status.resources | length == 0 or
           kubevirt_status.resources[0].status.phase != "Deployed"
 
@@ -66,6 +66,30 @@
         name: qemu-img
         state: present
 
+    - name: Ensure parted is installed (for partition table detection)
+      ansible.builtin.package:
+        name: parted
+        state: present
+
+    - name: Detect source VHD format (vhd/vpc vs vhdx)
+      ansible.builtin.shell: |
+        SRC={{ vhd_path | default('/root/win2019server.vhd') }}
+        fmt=$(qemu-img info "$SRC" 2>/dev/null | awk -F': ' '/file format/ {print $2}')
+        case "$fmt" in
+          vhd) echo vpc ;;
+          vpc) echo vpc ;;
+          vhdx) echo vhdx ;;
+          *) echo unknown ;;
+        esac
+      args:
+        executable: /bin/bash
+      register: vhd_src_fmt
+      changed_when: false
+
+    - name: Set qemu-img source format fact
+      ansible.builtin.set_fact:
+        qemu_src_fmt: "{{ 'vhdx' if vhd_src_fmt.stdout == 'vhdx' else 'vpc' }}"
+
     - name: Create base storage directory
       ansible.builtin.file:
         path: "{{ storage_dir }}"
@@ -83,7 +107,7 @@
         msg:
           - "📁 Storage directory: {{ storage_dir }}"
           - "💾 Available space: {{ available_space.stdout }}"
-          - "📊 Required space: ~{{ system_disk_size }}"
+          - "📊 Required space: ~{{ system_disk_size }} (system) + {{ installer_disk_size | default('12Gi') }} (installer request)"
 
     - name: Create directory structure for storage
       ansible.builtin.file:
@@ -92,25 +116,54 @@
         mode: '0755'
       loop:
         - "{{ storage_dir }}/win2019server-system-disk"
-        - "{{ storage_dir }}/win2019server-iso"
-        - "{{ storage_dir }}/win2019server-unattend"
+        - "{{ storage_dir }}/win2019server-installer"
         - "{{ storage_dir }}/win2019server-virtio-iso"
 
-    - name: Create system disk image
+    - name: Create blank system disk image (50Gi by default)
       ansible.builtin.shell: |
-        if [ ! -f {{ storage_dir }}/win2019server-system-disk/disk.img ]; then
-          qemu-img create -f raw {{ storage_dir }}/win2019server-system-disk/disk.img 50G
-          echo "Created new system disk: {{ storage_dir }}/win2019server-system-disk/disk.img"
+        DST={{ storage_dir }}/win2019server-system-disk/disk.img
+        if [ -f "$DST" ]; then
+          echo "System disk already exists: $DST"
         else
-          echo "System disk already exists: {{ storage_dir }}/win2019server-system-disk/disk.img"
+          qemu-img create -f raw "$DST" {{ system_disk_size | default('50Gi') }}
+          echo "Created blank system disk: $DST (size={{ system_disk_size | default('50Gi') }})"
         fi
       register: system_disk_result
 
-    - name: Copy ISO to storage structure
-      ansible.builtin.copy:
-        src: "{{ iso_path }}"
-        dest: "{{ storage_dir }}/win2019server-iso/disk.img"
-        mode: '0644'
+    - name: Prepare installer VHD as separate disk (convert to raw) with correct source format
+      ansible.builtin.shell: |
+        DST={{ storage_dir }}/win2019server-installer/disk.img
+        SRC={{ vhd_path | default('/root/win2019server.vhd') }}
+        if [ -f "$DST" ]; then
+          echo "Installer disk already prepared: $DST"
+        else
+          echo "Converting with source format: {{ qemu_src_fmt }}"
+          qemu-img convert -f {{ qemu_src_fmt }} -O raw "$SRC" "$DST"
+          echo "Prepared installer disk from VHD: $DST"
+        fi
+      register: installer_disk_result
+
+    - name: Detect partition table on converted installer disk (GPT vs MBR)
+      ansible.builtin.shell: |
+        DST={{ storage_dir }}/win2019server-installer/disk.img
+        if [ -f "$DST" ]; then
+          part="$(parted -s "$DST" print 2>/dev/null | awk -F': ' '/Partition Table/ {print tolower($2)}')"
+          if [ -z "$part" ]; then echo unknown; else echo "$part"; fi
+        else
+          echo missing
+        fi
+      args:
+        executable: /bin/bash
+      register: installer_ptable
+      changed_when: false
+
+    - name: Decide boot mode based on partition table (EFI for GPT, BIOS for msdos)
+      ansible.builtin.set_fact:
+        boot_mode: "{{ 'efi' if installer_ptable.stdout == 'gpt' else 'bios' }}"
+
+    - name: Compute VM bootloader structure (as JSON for safe insertion)
+      ansible.builtin.set_fact:
+        vm_bootloader_json: "{{ ({'efi': {'efi': {'secureBoot': False}}, 'bios': {'bios': {}}})[boot_mode | default('efi')] | to_json }}"
 
     - name: Set default VirtIO ISO download URL when not provided
       ansible.builtin.set_fact:
@@ -133,10 +186,100 @@
 
     - name: Display disk creation result
       ansible.builtin.debug:
-        msg: "{{ system_disk_result.stdout }}"
+        msg:
+          - "{{ system_disk_result.stdout }}"
+          - "{{ installer_disk_result.stdout }}"
+          - "Detected source VHD format: {{ qemu_src_fmt }}"
+          - "Detected installer partition table: {{ installer_ptable.stdout }}"
+          - "Selected boot mode: {{ boot_mode | default('efi') }}"
 
 - name: Create unattended installation files
   block:
+    - name: Create Install-VirtIO.ps1 script (used during setup and as fallback)
+      ansible.builtin.copy:
+        dest: "{{ storage_dir }}/Install-VirtIO.ps1"
+        mode: '0644'
+        content: |
+          # Install VirtIO drivers for Windows Server 2019
+          $ErrorActionPreference = 'Continue'
+          $log = 'C:\\Windows\\Temp\\virtio-install.log'
+          try { Start-Transcript -Path $log -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
+
+          function Get-VirtioRoot {
+            # Prefer explicit D: mapping when available
+            if (Test-Path 'D:\\NetKVM') { return 'D:\\' }
+            $deadline = (Get-Date).AddMinutes(5)
+            do {
+              $vol = Get-WmiObject Win32_Volume |
+                Where-Object { $_.DriveType -eq 5 -and ($_.Label -match 'virtio' -or $_.Label -match 'VIRTIO') } |
+                Select-Object -First 1
+              if ($vol -and $vol.DriveLetter) { return ($vol.DriveLetter + '\\') }
+              foreach ($l in 'D'..'Z') {
+                $root = "$l:\\"
+                if (Test-Path (Join-Path $root 'NetKVM')) { return $root }
+              }
+              Start-Sleep -Seconds 5
+            } while ((Get-Date) -lt $deadline)
+            return $null
+          }
+
+          $root = Get-VirtioRoot
+          if (-not $root) {
+            Write-Host 'VirtIO ISO not found.'
+          } else {
+            Write-Host "Using VirtIO root: $root"
+            # Prefer NetKVM first to enable networking (try direct INF with pnputil)
+            $nkCandidates = @(
+              (Join-Path $root 'NetKVM\2k19\amd64\netkvm.inf')
+              # Windows 2019 only; removed w10 path
+            )
+            foreach ($nk in $nkCandidates) {
+              if (Test-Path $nk) {
+                Write-Host "Installing NetKVM from $nk"
+                pnputil /add-driver "$nk" /install
+                if ($LASTEXITCODE -ne 0) { Write-Host "pnputil returned $LASTEXITCODE for NetKVM" }
+                break
+              }
+            }
+
+            # Install a curated set of VirtIO drivers using pnputil; fall back to DISM recurse
+            $driverDirs = @('vioscsi','viostor','Balloon','vioinput','viorng','pvpanic','qxl','qxldod','vioser','NetKVM')
+            foreach ($d in $driverDirs) {
+              $paths = @(
+                Join-Path $root ($d + '\\2k19\\amd64')
+                # Windows 2019 only; removed w10 path
+              )
+              foreach ($p in $paths) {
+                if (Test-Path $p) {
+                  Write-Host "Installing drivers from $p"
+                  pnputil /add-driver (Join-Path $p '*.inf') /subdirs /install
+                  break
+                }
+              }
+            }
+
+            # Final sweep with DISM in case anything was missed
+            Write-Host "Final DISM sweep under $root"
+            & dism.exe /online /add-driver /driver:"$root" /recurse
+          }
+          try { pnputil /scan-devices } catch {}
+          try { Stop-Transcript } catch {}
+
+    - name: Create SetupComplete.cmd (fallback to ensure drivers installation runs at end of setup)
+      ansible.builtin.copy:
+        dest: "{{ storage_dir }}/SetupComplete.cmd"
+        mode: '0644'
+        content: |
+          @echo off
+          REM Ensure target folder exists
+          if not exist C:\\Windows\\Setup\\Scripts mkdir C:\\Windows\\Setup\\Scripts
+          REM Copy script locally for reliability
+          copy /Y %SystemDrive%\\Windows\\Temp\\Install-VirtIO.ps1 nul 2>nul
+          if %ERRORLEVEL% NEQ 0 (
+              if exist D:\\Install-VirtIO.ps1 copy /Y D:\\Install-VirtIO.ps1 C:\\Windows\\Temp\\Install-VirtIO.ps1
+          )
+          powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\Install-VirtIO.ps1
+
     - name: Create Autounattend.xml for automated installation
       ansible.builtin.copy:
         dest: "{{ storage_dir }}/Autounattend.xml"
@@ -144,17 +287,14 @@
         content: |
           <?xml version="1.0" encoding="utf-8"?>
           <unattend xmlns="urn:schemas-microsoft-com:unattend">
-            <settings pass="windowsPE">
+            <settings pass="oobeSystem">
               <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
                          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                         name="Microsoft-Windows-International-Core-WinPE"
+                         name="Microsoft-Windows-International-Core"
                          processorArchitecture="amd64"
                          publicKeyToken="31bf3856ad364e35"
                          language="neutral"
                          versionScope="nonSxS">
-                <SetupUILanguage>
-                  <UILanguage>en-US</UILanguage>
-                </SetupUILanguage>
                 <InputLocale>en-US</InputLocale>
                 <SystemLocale>en-US</SystemLocale>
                 <UILanguage>en-US</UILanguage>
@@ -162,99 +302,12 @@
               </component>
               <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
                          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                         name="Microsoft-Windows-Setup"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
-                <!-- Full UEFI/GPT partition layout: EFI (FAT32), MSR, Primary (NTFS) -->
-                <DiskConfiguration>
-                  <Disk wcm:action="add">
-                    <DiskID>0</DiskID>
-                    <WillWipeDisk>true</WillWipeDisk>
-                    <CreatePartitions>
-                      <CreatePartition wcm:action="add">
-                        <Order>1</Order>
-                        <Type>EFI</Type>
-                        <Size>100</Size>
-                      </CreatePartition>
-                      <CreatePartition wcm:action="add">
-                        <Order>2</Order>
-                        <Type>MSR</Type>
-                        <Size>16</Size>
-                      </CreatePartition>
-                      <CreatePartition wcm:action="add">
-                        <Order>3</Order>
-                        <Type>Primary</Type>
-                        <Extend>true</Extend>
-                      </CreatePartition>
-                    </CreatePartitions>
-                    <ModifyPartitions>
-                      <ModifyPartition wcm:action="add">
-                        <Order>1</Order>
-                        <PartitionID>1</PartitionID>
-                        <Format>FAT32</Format>
-                        <Label>System</Label>
-                      </ModifyPartition>
-                      <ModifyPartition wcm:action="add">
-                        <Order>2</Order>
-                        <PartitionID>3</PartitionID>
-                        <Format>NTFS</Format>
-                        <Label>Windows</Label>
-                        <Letter>C</Letter>
-                      </ModifyPartition>
-                    </ModifyPartitions>
-                  </Disk>
-                  <WillShowUI>OnError</WillShowUI>
-                </DiskConfiguration>
-                <ImageInstall>
-                  <OSImage>
-                    <InstallFrom>
-                      <MetaData wcm:action="add">
-                        <Key>/IMAGE/INDEX</Key>
-                        <Value>2</Value>
-                      </MetaData>
-                    </InstallFrom>
-                    <InstallTo>
-                      <DiskID>0</DiskID>
-                      <PartitionID>3</PartitionID>
-                    </InstallTo>
-                    <WillShowUI>Never</WillShowUI>
-                  </OSImage>
-                </ImageInstall>
-                <UserData>
-                  <AcceptEula>true</AcceptEula>
-          {% if windows_product_key %}
-                  <ProductKey>
-                    <Key>{{ windows_product_key }}</Key>
-                    <WillShowUI>Never</WillShowUI>
-                  </ProductKey>
-          {% endif %}
-                </UserData>
-              </component>
-              <!-- Pre-stage NetKVM driver so network can initialize earlier -->
-              <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
-                         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                         name="Microsoft-Windows-PnpCustomizationsWinPE"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
-                <DriverPaths>
-                  <PathAndCredentials wcm:action="add">
-                    <Path>E:\NetKVM\2k19\amd64</Path>
-                  </PathAndCredentials>
-                </DriverPaths>
-              </component>
-            </settings>
-            <settings pass="oobeSystem">
-              <component xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State"
-                         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                          name="Microsoft-Windows-Shell-Setup"
                          processorArchitecture="amd64"
                          publicKeyToken="31bf3856ad364e35"
                          language="neutral"
                          versionScope="nonSxS">
+                <TimeZone>UTC</TimeZone>
                 <UserAccounts>
                   <AdministratorPassword>
                     <Value>{{ windows_admin_password }}</Value>
@@ -262,92 +315,128 @@
                   </AdministratorPassword>
                 </UserAccounts>
                 <AutoLogon>
+                  <Enabled>true</Enabled>
+                  <LogonCount>3</LogonCount>
+                  <Domain>.</Domain>
                   <Username>Administrator</Username>
                   <Password>
                     <Value>{{ windows_admin_password }}</Value>
                     <PlainText>true</PlainText>
                   </Password>
-                  <Enabled>true</Enabled>
-                  <LogonCount>1</LogonCount>
                 </AutoLogon>
-                <RegisteredOwner>KubeVirt Automation</RegisteredOwner>
-                <RegisteredOrganization>Kubernetes Infrastructure</RegisteredOrganization>
-                <TimeZone>UTC</TimeZone>
                 <OOBE>
                   <HideEULAPage>true</HideEULAPage>
-                  <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                  <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                  <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                  <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                  <NetworkLocation>Work</NetworkLocation>
-                  <ProtectYourPC>1</ProtectYourPC>
                 </OOBE>
                 <FirstLogonCommands>
                   <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
                     <Description>Install VirtIO NetKVM Driver</Description>
-                    <!-- Assume VirtIO ISO is mounted as drive E:; install NetKVM first for early network availability -->
-                    <CommandLine>cmd /c if exist E:\NetKVM\2k19\amd64\netkvm.inf (echo Installing NetKVM from E:\NetKVM\WIN2019\amd64\netkvm.inf & pnputil /add-driver E:\NetKVM\WIN2019\amd64\netkvm.inf /install & pnputil /scan-devices)</CommandLine>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\NetKVM\2k19\amd64\netkvm.inf (echo Installing NetKVM from D:\NetKVM\2k19\amd64\netkvm.inf &amp; pnputil /add-driver D:\NetKVM\2k19\amd64\netkvm.inf /install &amp; pnputil /scan-devices)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>2</Order>
-                    <Description>Install All Remaining VirtIO Drivers</Description>
-                    <!-- Loop remaining driver folders on E: (exclude NetKVM already installed) -->
-                    <CommandLine>cmd /c if exist E:\ (for %%D in (viostor vioscsi vioserial viorng viofs viosock Balloon qxl pvpanic) do if exist E:\%%D\WIN2019\amd64\*.inf pnputil /add-driver E:\%%D\WIN2019\amd64\*.inf /install)</CommandLine>
+                    <Description>Install VirtIO RNG (viorng)</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\viorng\2k19\amd64\viorng.inf (echo Installing VirtIO RNG drivers &amp; pnputil /add-driver D:\viorng\2k19\amd64\viorng.inf /install)</CommandLine>
                   </SynchronousCommand>
-                  {% if static_ip is defined and static_prefix is defined and static_gateway is defined %}
                   <SynchronousCommand wcm:action="add">
                     <Order>3</Order>
-                    <Description>Configure Static IP</Description>
-                    <CommandLine>powershell -ExecutionPolicy Bypass -Command "$i=0; while($i -lt 30 -and -not (Get-NetAdapter -Physical | Where-Object Status -eq 'Up')) { Start-Sleep 2; $i++ }; $a=Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -First 1; if($a){ New-NetIPAddress -InterfaceIndex $a.ifIndex -IPAddress {{ static_ip }} -PrefixLength {{ static_prefix }} -DefaultGateway {{ static_gateway }} -ErrorAction SilentlyContinue; Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses {{ static_dns | default(static_gateway) }} } else { Write-Host 'No active adapter for static IP config'; exit 0 }"</CommandLine>
+                    <Description>Install VirtIO Balloon Driver</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\Balloon\2k19\amd64\balloon.inf (echo Installing VirtIO Balloon drivers &amp; pnputil /add-driver D:\Balloon\2k19\amd64\balloon.inf /install)</CommandLine>
                   </SynchronousCommand>
-                  {% endif %}
                   <SynchronousCommand wcm:action="add">
-                    <Order>{% if static_ip is defined and static_prefix is defined and static_gateway is defined %}4{% else %}3{% endif %}</Order>
+                    <Order>4</Order>
+                    <Description>Install VirtIO Serial Driver</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\vioserial\2k19\amd64\vioser.inf (echo Installing VirtIO Serial drivers &amp; pnputil /add-driver D:\vioserial\2k19\amd64\vioser.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>5</Order>
+                    <Description>Install VirtIO SCSI Driver</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\vioscsi\2k19\amd64\vioscsi.inf (echo Installing VirtIO SCSI drivers &amp; pnputil /add-driver D:\vioscsi\2k19\amd64\vioscsi.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>6</Order>
+                    <Description>Install VirtIO Input (Tablet/HID) Driver</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\vioinput\2k19\amd64\vioinput.inf (echo Installing VirtIO Input drivers &amp; pnputil /add-driver D:\vioinput\2k19\amd64\vioinput.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>7</Order>
+                    <Description>Install VirtIO GPU DOD Driver</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\viogpu\2k19\amd64\viogpudo.inf (echo Installing VirtIO GPU DOD driver &amp; pnputil /add-driver D:\viogpu\2k19\amd64\viogpudo.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>8</Order>
+                    <Description>Install Remaining VirtIO Drivers (bulk)</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\ (for %%D in (viostor viofs viosock qxl pvpanic) do if exist D:\%%D\2k19\amd64\*.inf pnputil /add-driver D:\%%D\2k19\amd64\*.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>9</Order>
                     <Description>Enable Remote Desktop</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
-                    <Order>{% if static_ip is defined and static_prefix is defined and static_gateway is defined %}5{% else %}4{% endif %}</Order>
+                    <Order>10</Order>
                     <Description>Allow RDP through firewall</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>netsh advfirewall firewall set rule group="remote desktop" new enable=Yes</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
-                    <Order>{% if static_ip is defined and static_prefix is defined and static_gateway is defined %}6{% else %}5{% endif %}</Order>
+                    <Order>11</Order>
                     <Description>Enable WinRM</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>winrm quickconfig -quiet</CommandLine>
                   </SynchronousCommand>
                 </FirstLogonCommands>
               </component>
             </settings>
           </unattend>
-    - name: Create unattend ISO (must contain Autounattend.xml at root)
-      ansible.builtin.shell: |
-        mkdir -p {{ storage_dir }}/unattend_temp
-        cp {{ storage_dir }}/Autounattend.xml {{ storage_dir }}/unattend_temp/Autounattend.xml
-        
-        if command -v genisoimage >/dev/null 2>&1; then
-          genisoimage -o {{ storage_dir }}/win2019server-unattend/disk.img -V "UNATTEND" -r -J {{ storage_dir }}/unattend_temp/
-        elif command -v mkisofs >/dev/null 2>&1; then
-          mkisofs -o {{ storage_dir }}/win2019server-unattend/disk.img -V "UNATTEND" -r -J {{ storage_dir }}/unattend_temp/
-        else
-          yum install -y genisoimage || dnf install -y genisoimage
-          genisoimage -o {{ storage_dir }}/win2019server-unattend/disk.img -V "UNATTEND" -r -J {{ storage_dir }}/unattend_temp/
-        fi
-        
-        rm -rf {{ storage_dir }}/unattend_temp
-        chmod 644 {{ storage_dir }}/win2019server-unattend/disk.img
-        echo "Created unattend ISO: {{ storage_dir }}/win2019server-unattend/disk.img"
-      register: unattend_creation
+
+    - name: Load Autounattend.xml content
+      ansible.builtin.slurp:
+        src: "{{ storage_dir }}/Autounattend.xml"
+      register: unattend_slurped
+
+    - name: Load Install-VirtIO.ps1 content
+      ansible.builtin.slurp:
+        src: "{{ storage_dir }}/Install-VirtIO.ps1"
+      register: install_ps1_slurped
+
+    - name: Load SetupComplete.cmd content
+      ansible.builtin.slurp:
+        src: "{{ storage_dir }}/SetupComplete.cmd"
+      register: setupcomplete_slurped
+
+    - name: Create Sysprep Secret with unattend files
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: win2019server-sysprep
+            namespace: "{{ kubevirt_namespace }}"
+          type: Opaque
+          data:
+            Autounattend.xml: "{{ unattend_slurped.content }}"
+            Unattend.xml: "{{ unattend_slurped.content }}"
+            unattend.xml: "{{ unattend_slurped.content }}"
+            Install-VirtIO.ps1: "{{ install_ps1_slurped.content }}"
+            SetupComplete.cmd: "{{ setupcomplete_slurped.content }}"
 
     - name: Display unattend configuration
       ansible.builtin.debug:
         msg:
           - "📋 Unattend.xml Configuration:"
           - "  - Administrator Password: {{ windows_admin_password }}"
-          - "  - Windows Edition: Standard (Index 2)"
-          - "  - Auto-enabled: RDP, WinRM"
-          - "{{ unattend_creation.stdout }}"
+          - "  - Sysprep Secret: win2019server-sysprep (Autounattend.xml)"
 
 - name: Create Kubernetes storage resources
   block:
@@ -397,9 +486,8 @@
                     operator: In
                     values: ["{{ node_hostname.stdout }}"]
       loop:
+        - { name: "win2019server-installer-pv", size: "{{ installer_disk_size | default('12Gi') }}", access_modes: ["ReadWriteOnce"], path: "win2019server-installer" }
         - { name: "win2019server-system-pv", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"], path: "win2019server-system-disk" }
-        - { name: "win2019server-iso-pv", size: "{{ iso_size }}", access_modes: ["ReadOnlyMany"], path: "win2019server-iso" }
-        - { name: "win2019server-unattend-pv", size: "10Mi", access_modes: ["ReadOnlyMany"], path: "win2019server-unattend" }
         - { name: "win2019server-virtio-iso-pv", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"], path: "win2019server-virtio-iso" }
 
     - name: Create PersistentVolumeClaims
@@ -419,9 +507,8 @@
             storageClassName: local-storage
             volumeMode: Filesystem
       loop:
+        - { name: "win2019server-installer-pvc", size: "{{ installer_disk_size | default('12Gi') }}", access_modes: ["ReadWriteOnce"] }
         - { name: "win2019server-system-pvc", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"] }
-        - { name: "win2019server-iso-pvc", size: "{{ iso_size }}", access_modes: ["ReadOnlyMany"] }
-        - { name: "win2019server-unattend-pvc", size: "10Mi", access_modes: ["ReadOnlyMany"] }
         - { name: "win2019server-virtio-iso-pvc", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"] }
 
 - name: Deploy Windows Server VM
@@ -451,6 +538,7 @@
                 domain:
                   cpu:
                     cores: "{{ vm_cpu_cores }}"
+                    model: "{{ vm_cpu_model | default('host-model') }}"
                   memory:
                     guest: "{{ vm_memory }}"
                   machine:
@@ -469,16 +557,17 @@
                       reset: { enabled: true }
                       frequencies: { enabled: true }
                   firmware:
-                    bootloader:
-                      efi: { secureBoot: false }
+                    bootloader: "{{ vm_bootloader_json | from_json }}"
                   devices:
+                    bootMenu:
+                      enabled: true
                     autoattachPodInterface: false
                     autoattachSerialConsole: true
                     autoattachGraphicsDevice: true
                     rng: {}
                     disks:
-                    - name: install-iso
-                      cdrom: { bus: sata }
+                    - name: installer-vhd
+                      disk: { bus: sata }
                       bootOrder: 1
                     - name: system-disk
                       disk: { bus: sata }
@@ -486,13 +575,20 @@
                     - name: virtio-iso
                       cdrom: { bus: sata }
                       bootOrder: 3
-                    - name: unattend-iso
+                    - name: sysprep
                       cdrom: { bus: sata }
                       bootOrder: 4
                     interfaces:
                     - name: default
                       masquerade: {}
                       model: virtio
+                    inputs:
+                    - type: tablet
+                      bus: usb
+                    video:
+                    - name: video0
+                      device:
+                        name: virtio
                   resources:
                     requests:
                       memory: "{{ vm_memory }}"
@@ -501,14 +597,16 @@
                 - name: default
                   pod: {}
                 volumes:
+                - name: installer-vhd
+                  persistentVolumeClaim: { claimName: win2019server-installer-pvc }
                 - name: system-disk
                   persistentVolumeClaim: { claimName: win2019server-system-pvc }
-                - name: install-iso
-                  persistentVolumeClaim: { claimName: win2019server-iso-pvc }
                 - name: virtio-iso
                   persistentVolumeClaim: { claimName: win2019server-virtio-iso-pvc }
-                - name: unattend-iso
-                  persistentVolumeClaim: { claimName: win2019server-unattend-pvc }
+                - name: sysprep
+                  sysprep:
+                    secret:
+                      name: win2019server-sysprep
 
     - name: Create VNC access service
       tags: [access_services]
@@ -522,7 +620,6 @@
             namespace: "{{ kubevirt_namespace }}"
             labels:
               app: win2019server
-              role: vnc
           spec:
             type: NodePort
             selector:
@@ -534,56 +631,54 @@
                 protocol: TCP
                 nodePort: 30001
  
-- name: Verify installation
-  block:
-    - name: Wait for VM to be created
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachine
-        name: "{{ vm_name }}"
-        namespace: "{{ kubevirt_namespace }}"
-      register: deployed_vm
-      until: deployed_vm.resources | length > 0
-      retries: 10
-      delay: 5
+    - name: Verify installation
+      block:
+        - name: Wait for VM to be created
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachine
+            namespace: "{{ kubevirt_namespace }}"
+          register: deployed_vm
+          until: deployed_vm.resources | length > 0
+          retries: 10
 
-    - name: Wait for VM to start
-      kubernetes.core.k8s_info:
-        api_version: kubevirt.io/v1
-        kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ kubevirt_namespace }}"
-      register: vmi_status
-      until: 
-        - vmi_status.resources | length > 0
-        - vmi_status.resources[0].status.phase in ["Running", "Scheduled"]
-      retries: 30
-      delay: 10
-      
-    - name: Display installation results
-      ansible.builtin.debug:
-        msg:
-          - "🎉 Windows Server 2019 VM Installation Complete!"
-          - ""
-          - "📊 Status Information:"
-          - "  VM Status: {{ deployed_vm.resources[0].status.printableStatus | default('Created') }}"
-          - "  VMI Phase: {{ vmi_status.resources[0].status.phase | default('Pending') }}"
-          - "  Node: {{ vmi_status.resources[0].status.nodeName | default('Not assigned') }}"
-          - "  IP: {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('Not assigned') }}"
-          - ""
-          - "🔐 Access Information:"
-          - "  Administrator Password: {{ windows_admin_password }}"
-          - "  VNC Access: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
-          - "  Console Access: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
-          - "  VNC NodePort: 30001 (if NodePort allowed through firewall)"
-          - ""
-          - "📁 Storage Configuration:"
-          - "  System Disk: {{ storage_dir }}/win2019server-system-disk/disk.img ({{ system_disk_size }})"
-          - "  Install ISO: {{ storage_dir }}/win2019server-iso/disk.img"
-          - "  VirtIO ISO: {{ storage_dir }}/win2019server-virtio-iso/disk.img"
-          - "  Unattend ISO: {{ storage_dir }}/win2019server-unattend/disk.img"
-          - ""
-          - "🛠 Next Steps:"
-          - "1. Access VM via VNC to monitor Windows installation"
-          - "2. Installation should proceed automatically with unattend.xml"
-          - "3. Login with Administrator/{{ windows_admin_password }} after installation"
+        - name: Wait for VM to start
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstance
+            name: "{{ vm_name }}"
+            namespace: "{{ kubevirt_namespace }}"
+          register: vmi_status
+          until:
+            - vmi_status.resources | length > 0
+            - vmi_status.resources[0].status.phase in ["Running", "Scheduled"]
+          retries: 30
+          delay: 10
+          
+        - name: Display installation results
+          ansible.builtin.debug:
+            msg:
+              - "🎉 Windows Server 2019 VM Installation Complete!"
+              - ""
+              - "📊 Status Information:"
+              - "  VM Status: {{ deployed_vm.resources[0].status.printableStatus | default('Created') }}"
+              - "  VMI Phase: {{ vmi_status.resources[0].status.phase | default('Pending') }}"
+              - "  Node: {{ vmi_status.resources[0].status.nodeName | default('Not assigned') }}"
+              - "  IP: {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('Not assigned') }}"
+              - ""
+              - "🔐 Access Information:"
+              - "  Administrator Password: {{ windows_admin_password }}"
+              - "  VNC Access: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
+              - "  Console Access: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
+              - "  VNC NodePort: 30001 (if NodePort allowed through firewall)"
+              - ""
+              - "📁 Storage Configuration:"
+              - "  Installer VHD: {{ storage_dir }}/win2019server-installer/disk.img (boot)"
+              - "  System Disk: {{ storage_dir }}/win2019server-system-disk/disk.img (blank {{ system_disk_size }})"
+              - "  VirtIO ISO: {{ storage_dir }}/win2019server-virtio-iso/disk.img"
+              - "  Sysprep: Secret win2019server-sysprep (Autounattend.xml)"
+              - ""
+              - "🛠 Next Steps:"
+              - "1. Access VM via VNC to monitor Windows installation"
+              - "2. Installation should proceed automatically with unattend.xml"
+              - "3. Login with Administrator/{{ windows_admin_password }} after installation"

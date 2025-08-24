@@ -101,23 +101,66 @@
         wait: true
         wait_timeout: 120
       loop:
-        # VM Resources
-        - { api_version: "kubevirt.io/v1", kind: "VirtualMachine", name: "{{ vm_name }}", namespaced: true }
-        
+        # VM
+        - api_version: kubevirt.io/v1
+          kind: VirtualMachine
+          name: "{{ vm_name }}"
+          namespaced: true
+        # Sysprep Secret
+        - api_version: v1
+          kind: Secret
+          name: win2019server-sysprep
+          namespaced: true
+
         # Services
-        - { api_version: "v1", kind: "Service", name: "win2019server-vnc", namespaced: true }
-        - { api_version: "v1", kind: "Service", name: "win2019server-rdp", namespaced: true }
-        - { api_version: "v1", kind: "Service", name: "win2019server-web", namespaced: true }
-        
-        # PVCs
-        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "win2019server-system-pvc", namespaced: true }
-        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "win2019server-iso-pvc", namespaced: true }
-        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "win2019server-unattend-pvc", namespaced: true }
-        
-        # PVs (cluster-scoped)
-        - { api_version: "v1", kind: "PersistentVolume", name: "win2019server-system-pv", namespaced: false }
-        - { api_version: "v1", kind: "PersistentVolume", name: "win2019server-iso-pv", namespaced: false }
-        - { api_version: "v1", kind: "PersistentVolume", name: "win2019server-unattend-pv", namespaced: false }
+        - api_version: v1
+          kind: Service
+          name: win2019server-vnc
+          namespaced: true
+        - api_version: v1
+          kind: Service
+          name: win2019server-rdp
+          namespaced: true
+        - api_version: v1
+          kind: Service
+          name: win2019server-web
+          namespaced: true
+
+        # PVCs (remove both legacy and new names if present)
+        - api_version: v1
+          kind: PersistentVolumeClaim
+          name: win2019server-installer-pvc
+          namespaced: true
+        - api_version: v1
+          kind: PersistentVolumeClaim
+          name: win2019server-system-pvc
+          namespaced: true
+        - api_version: v1
+          kind: PersistentVolumeClaim
+          name: win2019server-virtio-iso-pvc
+          namespaced: true
+        - api_version: v1
+          kind: PersistentVolumeClaim
+          name: win2019server-iso-pvc
+          namespaced: true
+
+        # PVs (cluster-scoped; remove both legacy and new names)
+        - api_version: v1
+          kind: PersistentVolume
+          name: win2019server-installer-pv
+          namespaced: false
+        - api_version: v1
+          kind: PersistentVolume
+          name: win2019server-system-pv
+          namespaced: false
+        - api_version: v1
+          kind: PersistentVolume
+          name: win2019server-virtio-iso-pv
+          namespaced: false
+        - api_version: v1
+          kind: PersistentVolume
+          name: win2019server-iso-pv
+          namespaced: false
       ignore_errors: true
 
     - name: Wait for resource cleanup
@@ -132,18 +175,18 @@
       register: storage_dirs
       loop:
         - "{{ storage_dir }}/win2019server-system-disk"
-        - "{{ storage_dir }}/win2019server-iso"
-        - "{{ storage_dir }}/win2019server-unattend"
-        - "{{ storage_dir }}/unattend.xml"
+        - "{{ storage_dir }}/win2019server-installer"
+        - "{{ storage_dir }}/win2019server-virtio-iso"
+        - "{{ storage_dir }}/Autounattend.xml"
 
     - name: Display storage cleanup information
       ansible.builtin.debug:
         msg:
           - "🗂️  Storage directories to be removed:"
           - "  {{ storage_dir }}/win2019server-system-disk/ ({{ 'EXISTS' if storage_dirs.results[0].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/win2019server-iso/ ({{ 'EXISTS' if storage_dirs.results[1].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/win2019server-unattend/ ({{ 'EXISTS' if storage_dirs.results[2].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/unattend.xml ({{ 'EXISTS' if storage_dirs.results[3].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/win2019server-installer/ ({{ 'EXISTS' if storage_dirs.results[1].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/win2019server-virtio-iso/ ({{ 'EXISTS' if storage_dirs.results[2].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/Autounattend.xml ({{ 'EXISTS' if storage_dirs.results[3].stat.exists else 'NOT FOUND' }})"
 
     - name: Remove storage directories and files automatically
       ansible.builtin.file:
@@ -151,9 +194,9 @@
         state: absent
       loop:
         - "{{ storage_dir }}/win2019server-system-disk"
-        - "{{ storage_dir }}/win2019server-iso"
-        - "{{ storage_dir }}/win2019server-unattend"
-        - "{{ storage_dir }}/unattend.xml"
+        - "{{ storage_dir }}/win2019server-installer"
+        - "{{ storage_dir }}/win2019server-virtio-iso"
+        - "{{ storage_dir }}/Autounattend.xml"
 
     - name: Display storage removal result
       ansible.builtin.debug:

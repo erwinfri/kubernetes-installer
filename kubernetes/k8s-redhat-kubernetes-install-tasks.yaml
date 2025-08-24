@@ -162,6 +162,28 @@
   register: calico_apply
   changed_when: "calico_apply.rc == 0"
 
+- name: Configure CoreDNS for external DNS resolution
+  ansible.builtin.shell: |
+    kubectl -n kube-system get configmap coredns -o yaml | \
+      sed 's|forward . /etc/resolv.conf|forward . 8.8.8.8 8.8.4.4|' | \
+      kubectl apply -f -
+  register: coredns_config
+  changed_when: "'configured' in coredns_config.stderr"
+
+- name: Restart CoreDNS to apply DNS configuration
+  ansible.builtin.command: kubectl -n kube-system rollout restart deployment/coredns
+  register: coredns_restart
+  changed_when: "coredns_restart.rc == 0"
+
+- name: Wait for CoreDNS pods to be ready
+  ansible.builtin.shell: |
+    kubectl -n kube-system get pods -l k8s-app=kube-dns --no-headers | awk '{print $3}' | grep -v "Running" | wc -l
+  register: coredns_not_ready
+  retries: 15
+  delay: 10
+  until: coredns_not_ready.stdout == "0"
+  changed_when: false
+
 - name: Wait for node to be Ready
   ansible.builtin.shell: |
     kubectl get nodes --no-headers | awk '{print $2}' | grep -q "Ready"
