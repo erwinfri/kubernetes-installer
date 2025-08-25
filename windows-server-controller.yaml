@@ -43,7 +43,7 @@
 
     # Install Action
     - name: Execute Windows Server installation
-      ansible.builtin.include_tasks: windows-server/windows-server-install.yaml
+      ansible.builtin.include_tasks: windows-server/windows-server-2019-install.yaml
       tags:
         - install
         - windows_install
@@ -52,12 +52,12 @@
 
     # Uninstall Action
     - name: Execute Windows Server uninstallation
-      ansible.builtin.include_tasks: windows-server/windows-server-uninstall.yaml
+      ansible.builtin.include_tasks: windows-server/windows-server-2019-uninstall.yaml
       when: action == 'uninstall'
 
     # Status Action
     - name: Execute Windows Server status check
-      ansible.builtin.include_tasks: windows-server/windows-server-status.yaml
+      ansible.builtin.include_tasks: windows-server/windows-server-2019-status.yaml
       tags:
         - status
         - fast_status
@@ -70,7 +70,7 @@
           ansible.builtin.debug:
             msg: "🔄 Starting reinstall process - uninstall followed by install"
         - name: Execute uninstall phase
-          ansible.builtin.include_tasks: windows-server/windows-server-uninstall.yaml
+          ansible.builtin.include_tasks: windows-server/windows-server-2019-uninstall.yaml
         - name: Wait between uninstall and install
           ansible.builtin.debug:
             msg: "⏳ Waiting 15 seconds between uninstall and install phases..."
@@ -78,7 +78,7 @@
           ansible.builtin.wait_for:
             timeout: 15
         - name: Execute install phase
-          ansible.builtin.include_tasks: windows-server/windows-server-install.yaml
+          ansible.builtin.include_tasks: windows-server/windows-server-2019-install.yaml
       when: action == 'reinstall'
 
     - name: Display completion message
