@@ -9,15 +9,30 @@
   block:
     - name: Check if Windows Server 2019 VHD file exists
       ansible.builtin.stat:
-        path: "{{ vhd_path | default('/root/win2019server.vhd') }}"
+        path: "{{ vhd_path | default('./win2019server.vhd') }}"
       register: vhd_file_check
-      failed_when: not vhd_file_check.stat.exists
+
+    - name: Download Windows Server 2019 VHD if not present
+      ansible.builtin.get_url:
+        url: "{{ vhd_download_url | default('https://software-download.microsoft.com/download/pr/17763.737.amd64fre.rs5_release_svc_refresh.190906-2324_server_serverdatacentereval_en-us_1.vhd') }}"
+        dest: "{{ vhd_path | default('./win2019server.vhd') }}"
+        mode: '0644'
+        timeout: 1800  # 30 minutes timeout for large file
+      when: not vhd_file_check.stat.exists
+      register: vhd_download_result
+
+    - name: Re-check VHD file after potential download
+      ansible.builtin.stat:
+        path: "{{ vhd_path | default('./win2019server.vhd') }}"
+      register: vhd_file_final_check
+      failed_when: not vhd_file_final_check.stat.exists
 
     - name: Display VHD file information
       ansible.builtin.debug:
         msg:
-          - "Windows Server 2019 VHD found: {{ vhd_path | default('/root/win2019server.vhd') }}"
-          - "Size: {{ (vhd_file_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
+          - "Windows Server 2019 VHD found: {{ vhd_path | default('./win2019server.vhd') }}"
+          - "Size: {{ (vhd_file_final_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
+          - "{{ 'Downloaded from Microsoft' if (vhd_download_result is defined and vhd_download_result.changed | default(false)) else 'Using existing local file' }}"
 
     - name: Ensure KubeVirt namespace exists
       kubernetes.core.k8s:
@@ -73,7 +88,7 @@
 
     - name: Detect source VHD format (vhd/vpc vs vhdx)
       ansible.builtin.shell: |
-        SRC={{ vhd_path | default('/root/win2019server.vhd') }}
+        SRC={{ vhd_path | default('./win2019server.vhd') }}
         fmt=$(qemu-img info "$SRC" 2>/dev/null | awk -F': ' '/file format/ {print $2}')
         case "$fmt" in
           vhd) echo vpc ;;
@@ -107,6 +122,7 @@
         msg:
           - "📁 Storage directory: {{ storage_dir }}"
           - "💾 Available space: {{ available_space.stdout }}"
+          - "📊 VHD file size: {{ (vhd_file_final_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
           - "📊 Required space: ~{{ system_disk_size }} (system) + {{ installer_disk_size | default('12Gi') }} (installer request)"
 
     - name: Create directory structure for storage
@@ -133,7 +149,7 @@
     - name: Prepare installer VHD as separate disk (convert to raw) with correct source format
       ansible.builtin.shell: |
         DST={{ storage_dir }}/win2019server-installer/disk.img
-        SRC={{ vhd_path | default('/root/win2019server.vhd') }}
+        SRC={{ vhd_path | default('./win2019server.vhd') }}
         if [ -f "$DST" ]; then
           echo "Installer disk already prepared: $DST"
         else
@@ -668,17 +684,29 @@
               - ""
               - "🔐 Access Information:"
               - "  Administrator Password: {{ windows_admin_password }}"
-              - "  VNC Access: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
-              - "  Console Access: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
-              - "  VNC NodePort: 30001 (if NodePort allowed through firewall)"
               - ""
-              - "📁 Storage Configuration:"
+              - "🖥️  VNC Access:"
+              - "  Direct: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
+              - "  Proxy: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }} --proxy-only --port 5900"
+              - "  NodePort: localhost:30001 (if NodePort allowed through firewall)"
+              - ""
+              - "�️  RDP Access (after Windows setup completes):"
+              - "  Method 1 - Port Forward: kubectl -n {{ kubevirt_namespace }} port-forward service/{{ vm_name }}-vnc 3389:3389"
+              - "  Method 2 - VM IP Direct: RDP to {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('VM_IP') }}:3389"
+              - "  Method 3 - virtctl: virtctl port-forward {{ vm_name }} -n {{ kubevirt_namespace }} 3389:3389"
+              - "  Then connect RDP client to: localhost:3389"
+              - ""
+              - "🛠️  Console Access:"
+              - "  Serial: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
+              - ""
+              - "�📁 Storage Configuration:"
               - "  Installer VHD: {{ storage_dir }}/win2019server-installer/disk.img (boot)"
               - "  System Disk: {{ storage_dir }}/win2019server-system-disk/disk.img (blank {{ system_disk_size }})"
               - "  VirtIO ISO: {{ storage_dir }}/win2019server-virtio-iso/disk.img"
               - "  Sysprep: Secret win2019server-sysprep (Autounattend.xml)"
               - ""
               - "🛠 Next Steps:"
-              - "1. Access VM via VNC to monitor Windows installation"
-              - "2. Installation should proceed automatically with unattend.xml"
-              - "3. Login with Administrator/{{ windows_admin_password }} after installation"
+              - "1. Use VNC to monitor Windows installation progress"
+              - "2. Installation proceeds automatically with unattend.xml"
+              - "3. After Windows setup completes, use RDP for remote access"
+              - "4. Login with Administrator/{{ windows_admin_password }}"
