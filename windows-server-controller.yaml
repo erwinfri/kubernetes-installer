@@ -8,7 +8,8 @@
     action: "{{ action | default('install') }}"
     kubevirt_namespace: kubevirt
     vm_name: win2019server
-    vhd_path: /root/win2019server.vhd
+    vhd_path: ./win2019server.vhd
+    vhd_download_url: "{{ vhd_url | default('https://software-download.microsoft.com/download/pr/17763.737.amd64fre.rs5_release_svc_refresh.190906-2324_server_serverdatacentereval_en-us_1.vhd') }}"
     system_disk_size: "25Gi"
     installer_disk_size: "12Gi"
     vm_memory: 8Gi
@@ -93,4 +94,5 @@
           - ""
           - "Custom options:"
           - "  - Custom password: -e admin_password='YourPassword!'"
+          - "  - Custom VHD URL:  -e vhd_url='https://your-custom-vhd-url.com/file.vhd'"
           - "  - Product key:     -e product_key='XXXXX-XXXXX-XXXXX-XXXXX-XXXXX'"
