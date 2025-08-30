@@ -109,24 +109,54 @@
     gpgkey: https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
 
 # Install container runtime (containerd)
+- name: Install required packages for Docker repo
+  ansible.builtin.dnf:
+    name:
+      - yum-utils
+      - device-mapper-persistent-data
+      - lvm2
+    state: present
+
+- name: Add Docker's official repository
+  ansible.builtin.command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+  args:
+    creates: /etc/yum.repos.d/docker-ce.repo
+
 - name: Install containerd
   ansible.builtin.dnf:
     name: containerd.io
     state: present
-  ignore_errors: true
+  register: containerd_install
 
-- name: Ensure containerd config exists
-  ansible.builtin.shell: |
-    test -f /etc/containerd/config.toml || (mkdir -p /etc/containerd && containerd config default > /etc/containerd/config.toml)
-  changed_when: false
-  ignore_errors: true
+- name: Generate containerd configuration
+  ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+  register: containerd_config_generate
+
+- name: Enable SystemdCgroup in containerd config
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  register: containerd_config_change
 
 - name: Enable and start containerd
   ansible.builtin.systemd:
     name: containerd
     enabled: true
     state: started
-  ignore_errors: true
+    daemon_reload: yes
+
+- name: Restart containerd after configuration change
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+  when: containerd_install.changed or containerd_config_generate.changed or containerd_config_change.changed
+
+- name: Wait for containerd to be ready
+  ansible.builtin.pause:
+    seconds: 10
 
 - name: Install Kubernetes components
   ansible.builtin.dnf:
@@ -156,6 +186,17 @@
     chown $(id -u):$(id -g) /root/.kube/config
   args:
     creates: /root/.kube/config
+
+- name: Wait for API server to be ready
+  ansible.builtin.uri:
+    url: "https://{{ ansible_default_ipv4.address }}:6443/livez"
+    method: GET
+    validate_certs: no
+  register: api_health
+  until: api_health.status == 200
+  retries: 30
+  delay: 10
+  when: kubeadm_init.changed
 
 - name: Install Calico network plugin
   ansible.builtin.command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
@@ -220,4 +261,3 @@
       - "Hostname: {{ k8s_hostname }}"
       - "Init outcome: {{ 'ok' if kubeadm_init.rc == 0 else 'skipped/failed' }}"
       - "Node Ready state confirmed."
-
