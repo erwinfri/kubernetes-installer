@@ -86,25 +86,6 @@
         name: parted
         state: present
 
-    - name: Detect source VHDX format (vhdx/vpc vs vhdxx)
-      ansible.builtin.shell: |
-        SRC={{ vhdx_path | default('./win2025server.vhdx') }}
-        fmt=$(qemu-img info "$SRC" 2>/dev/null | awk -F': ' '/file format/ {print $2}')
-        case "$fmt" in
-          vhdx) echo vpc ;;
-          vpc) echo vpc ;;
-          vhdxx) echo vhdxx ;;
-          *) echo unknown ;;
-        esac
-      args:
-        executable: /bin/bash
-      register: vhdx_src_fmt
-      changed_when: false
-
-    - name: Set qemu-img source format fact
-      ansible.builtin.set_fact:
-        qemu_src_fmt: "{{ 'vhdxx' if vhdx_src_fmt.stdout == 'vhdxx' else 'vpc' }}"
-
     - name: Create base storage directory
       ansible.builtin.file:
         path: "{{ storage_dir }}"
@@ -135,33 +116,30 @@
         - "{{ storage_dir }}/win2025server-installer"
         - "{{ storage_dir }}/win2025server-virtio-iso"
 
-    - name: Create blank system disk image (50Gi by default)
+    - name: Convert Windows 2025 VHDX to system disk (RAW, direct boot)
       ansible.builtin.shell: |
         DST={{ storage_dir }}/win2025server-system-disk/disk.img
-        if [ -f "$DST" ]; then
-          echo "System disk already exists: $DST"
+        SRC={{ vhdx_path | default('./win2025server.vhdx') }}
+        ensure_raw() {
+          # Return 0 if file is raw format; 1 otherwise
+          [ -f "$1" ] || return 1
+          fmt=$(qemu-img info --output=json "$1" 2>/dev/null | sed -n 's/.*"format": "\([^"]*\)".*/\1/p')
+          [ "$fmt" = "raw" ]
+        }
+        if ensure_raw "$DST"; then
+          echo "Bootable RAW system disk already present: $DST"
         else
-          qemu-img create -f raw "$DST" {{ system_disk_size | default('50Gi') }}
-          echo "Created blank system disk: $DST (size={{ system_disk_size | default('50Gi') }})"
+          echo "Converting VHDX to RAW for direct boot (UEFI)"
+          qemu-img convert -p -f vhdx -O raw "$SRC" "$DST"
+          echo "Converted VHDX to RAW system disk: $DST"
         fi
       register: system_disk_result
 
-    - name: Prepare installer VHDX as separate disk (convert to raw) with correct source format
-      ansible.builtin.shell: |
-        DST={{ storage_dir }}/win2025server-installer/disk.img
-        SRC={{ vhdx_path | default('./win2025server.vhdx') }}
-        if [ -f "$DST" ]; then
-          echo "Installer disk already prepared: $DST"
-        else
-          echo "Converting with source format: {{ qemu_src_fmt }}"
-          qemu-img convert -f {{ qemu_src_fmt }} -O raw "$SRC" "$DST"
-          echo "Prepared installer disk from VHDX: $DST"
-        fi
-      register: installer_disk_result
+  # No installer disk needed for direct boot from pre-installed VHDX
 
-    - name: Detect partition table on converted installer disk (GPT vs MBR)
+    - name: Detect partition table on converted system disk (GPT vs MBR)
       ansible.builtin.shell: |
-        DST={{ storage_dir }}/win2025server-installer/disk.img
+        DST={{ storage_dir }}/win2025server-system-disk/disk.img
         if [ -f "$DST" ]; then
           part="$(parted -s "$DST" print 2>/dev/null | awk -F': ' '/Partition Table/ {print tolower($2)}')"
           if [ -z "$part" ]; then echo unknown; else echo "$part"; fi
@@ -170,87 +148,16 @@
         fi
       args:
         executable: /bin/bash
-      register: installer_ptable
+      register: system_ptable
       changed_when: false
 
-    - name: Decide boot mode based on partition table (EFI for GPT, BIOS for msdos)
+    - name: Set boot mode to UEFI (required for Windows 2025)
       ansible.builtin.set_fact:
-        boot_mode: "{{ 'efi' if installer_ptable.stdout == 'gpt' else 'bios' }}"
+        boot_mode: "uefi"
 
-    - name: Compute VM bootloader structure (as JSON for safe insertion)
+    - name: Compute VM bootloader structure (UEFI, no SecureBoot)
       ansible.builtin.set_fact:
-        vm_bootloader_json: "{{ ({'efi': {'efi': {'secureBoot': False}}, 'bios': {'bios': {}}})[boot_mode | default('efi')] | to_json }}"
-
-    - name: Set default VirtIO ISO download URL when not provided
-      ansible.builtin.set_fact:
-        virtio_iso_download_url: "{{ virtio_iso_url | default('https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso') }}"
-
-    - name: Check if VirtIO ISO already exists in playbook directory
-      ansible.builtin.stat:
-        path: "./virtio-win.iso"
-      register: virtio_iso_local_exists
-
-    - name: Check if VirtIO ISO already exists in storage directory
-      ansible.builtin.stat:
-        path: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
-      register: virtio_iso_storage_exists
-
-    - name: Download VirtIO driver ISO to playbook directory if not exists locally
-      ansible.builtin.get_url:
-        url: "{{ virtio_iso_download_url }}"
-        dest: "./virtio-win.iso"
-        mode: '0644'
-      when: 
-        - virtio_iso_path is not defined
-        - not virtio_iso_local_exists.stat.exists
-      register: virtio_iso_download_result
-
-    - name: Copy VirtIO ISO from playbook directory to storage directory
-      ansible.builtin.copy:
-        src: "./virtio-win.iso"
-        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
-        mode: '0644'
-      when: 
-        - virtio_iso_path is not defined
-        - not virtio_iso_storage_exists.stat.exists
-        - virtio_iso_local_exists.stat.exists or (virtio_iso_download_result is defined and virtio_iso_download_result.changed)
-      register: virtio_iso_copy_to_storage
-
-    - name: Display VirtIO ISO download status
-      ansible.builtin.debug:
-        msg: |
-          {% if virtio_iso_download_result is defined and virtio_iso_download_result.changed %}
-          Downloaded VirtIO ISO from {{ virtio_iso_download_url }} to ./virtio-win.iso
-          {% elif virtio_iso_copy_to_storage is defined and virtio_iso_copy_to_storage.changed %}
-          Copied existing VirtIO ISO from ./virtio-win.iso to storage directory
-          {% else %}
-          Using existing VirtIO ISO in storage directory
-          {% endif %}
-      when: virtio_iso_path is not defined
-
-    - name: Copy VirtIO driver ISO from custom path (requires virtio_iso_path variable)
-      ansible.builtin.copy:
-        src: "{{ virtio_iso_path }}"
-        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
-        mode: '0644'
-      when: 
-        - virtio_iso_path is defined
-        - not virtio_iso_storage_exists.stat.exists
-      register: virtio_iso_copy_result
-
-    - name: Display VirtIO ISO copy status
-      ansible.builtin.debug:
-        msg: "{{ 'Copied VirtIO ISO from ' + virtio_iso_path if (virtio_iso_copy_result is defined and virtio_iso_copy_result.changed) else 'Using existing local VirtIO ISO at ' + storage_dir + '/win2025server-virtio-iso/disk.img' }}"
-      when: virtio_iso_path is defined
-
-    - name: Display disk creation result
-      ansible.builtin.debug:
-        msg:
-          - "{{ system_disk_result.stdout }}"
-          - "{{ installer_disk_result.stdout }}"
-          - "Detected source VHDX format: {{ qemu_src_fmt }}"
-          - "Detected installer partition table: {{ installer_ptable.stdout }}"
-          - "Selected boot mode: {{ boot_mode | default('efi') }}"
+        vm_bootloader_json: "{{ {'efi': {'secureBoot': False}} | to_json }}"
 
 - name: Create unattended installation files
   block:
@@ -586,6 +493,15 @@
             unattend.xml: "{{ unattend_slurped.content }}"
             Install-VirtIO.ps1: "{{ install_ps1_slurped.content }}"
             SetupComplete.cmd: "{{ setupcomplete_slurped.content }}"
+            startup.nsh: "{{ ('echo -off\n' ~
+              'fs0:\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n' ~
+              'fs0:\\EFI\\BOOT\\BOOTX64.EFI\n' ~
+              'fs1:\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n' ~
+              'fs1:\\EFI\\BOOT\\BOOTX64.EFI\n' ~
+              'fs2:\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n' ~
+              'fs2:\\EFI\\BOOT\\BOOTX64.EFI\n' ~
+              'fs3:\\EFI\\Microsoft\\Boot\\bootmgfw.efi\n' ~
+              'fs3:\\EFI\\BOOT\\BOOTX64.EFI\n') | b64encode }}"
 
     - name: Display unattend configuration
       ansible.builtin.debug:
@@ -642,8 +558,8 @@
                     operator: In
                     values: ["{{ node_hostname.stdout }}"]
       loop:
-        - { name: "win2025server-installer-pv", size: "{{ installer_disk_size | default('12Gi') }}", access_modes: ["ReadWriteOnce"], path: "win2025server-installer" }
-        - { name: "win2025server-system-pv", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"], path: "win2025server-system-disk" }
+        - { name: "win2025server-installer-pv", size: "15Gi", access_modes: ["ReadWriteOnce"], path: "win2025server-installer" }
+        - { name: "win2025server-system-pv", size: "64Gi", access_modes: ["ReadWriteOnce"], path: "win2025server-system-disk" }
         - { name: "win2025server-virtio-iso-pv", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"], path: "win2025server-virtio-iso" }
 
     - name: Create PersistentVolumeClaims
@@ -663,13 +579,13 @@
             storageClassName: local-storage
             volumeMode: Filesystem
       loop:
-        - { name: "win2025server-installer-pvc", size: "{{ installer_disk_size | default('12Gi') }}", access_modes: ["ReadWriteOnce"] }
-        - { name: "win2025server-system-pvc", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"] }
+        - { name: "win2025server-installer-pvc", size: "15Gi", access_modes: ["ReadWriteOnce"] }
+        - { name: "win2025server-system-pvc", size: "64Gi", access_modes: ["ReadWriteOnce"] }
         - { name: "win2025server-virtio-iso-pvc", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"] }
 
 - name: Deploy Windows Server VM
   block:
-    - name: Build VirtualMachine definition
+    - name: Build VirtualMachine definition (UEFI, direct boot from QCOW2 system disk)
       ansible.builtin.set_fact:
         vm_definition:
           apiVersion: kubevirt.io/v1
@@ -693,44 +609,39 @@
                 domain:
                   cpu:
                     cores: "{{ vm_cpu_cores | int }}"
-                    model: "{{ vm_cpu_model | default('host-model') }}"
+                    model: "host-passthrough"
+                  resources:
+                    requests:
+                      memory: "{{ vm_memory }}"
                   memory:
                     guest: "{{ vm_memory }}"
                   machine:
                     type: q35
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                    smm:
+                      enabled: true
                   features:
-                    acpi: 
-                      enabled: true
-                    apic: 
-                      enabled: true
+                    acpi: {}
+                    apic: {}
                     hyperv:
-                      relaxed: 
-                        enabled: true
-                      vapic: 
-                        enabled: true
-                      spinlocks: 
-                        enabled: true
+                      relaxed: {}
+                      vapic: {}
+                      spinlocks:
                         retries: 8191
-                      vpindex: 
-                        enabled: true
-                      runtime: 
-                        enabled: true
-                      synic: 
-                        enabled: true
-                      stimer: 
-                        enabled: true
-                      reset: 
-                        enabled: true
-                      frequencies: 
-                        enabled: true
-                      reenlightenment: 
-                        enabled: true
-                      tlbflush: 
-                        enabled: true
-                      ipi: 
-                        enabled: true
-                      evmcs: 
-                        enabled: true
+                      synic: {}
+                      synictimer:
+                        direct: {}
+                      vpindex: {}
+                      runtime: {}
+                      reset: {}
+                      freqs: {}
+                      reenlightenment: {}
+                      tscFrequency: {}
+                      tlbflush: {}
+                      ipi: {}
                   clock:
                     timezone: UTC
                     timer:
@@ -740,7 +651,7 @@
                         tickPolicy: delay
                       rtc:
                         tickPolicy: catchup
-                      hyperv: 
+                      hyperv:
                         present: true
                   devices:
                     bootMenu:
@@ -750,22 +661,14 @@
                     autoattachGraphicsDevice: true
                     rng: {}
                     disks:
-                      - name: installer-disk
+                      - name: disk0
                         disk:
                           bus: sata
                         bootOrder: 1
-                      - name: system-disk
-                        disk:
-                          bus: sata
-                        bootOrder: 2
-                      - name: virtio-iso
-                        cdrom:
-                          bus: sata
-                        bootOrder: 3
                       - name: sysprep
                         cdrom:
                           bus: sata
-                        bootOrder: 4
+                        bootOrder: 2
                     interfaces:
                       - name: default
                         masquerade: {}
@@ -782,20 +685,15 @@
                   - name: default
                     pod: {}
                 volumes:
-                  - name: system-disk
+                  - name: disk0
                     persistentVolumeClaim:
                       claimName: "{{ vm_name }}-system-pvc"
-                  - name: installer-disk
-                    persistentVolumeClaim:
-                      claimName: "{{ vm_name }}-installer-pvc"
-                  - name: virtio-iso
-                    persistentVolumeClaim:
-                      claimName: "{{ vm_name }}-virtio-iso-pvc"
                   - name: sysprep
-                    secret:
-                      secretName: "{{ vm_name }}-sysprep"
+                    sysprep:
+                      secret:
+                        name: win2025server-sysprep
 
-    - name: Fix cores to be integer type
+    - name: Fix cores to be integer type (no change, kept for compatibility)
       ansible.builtin.set_fact:
         vm_definition: "{{ vm_definition | combine({'spec': {'template': {'spec': {'domain': {'cpu': {'cores': vm_cpu_cores | int}}}}}}, recursive=True) }}"
 
