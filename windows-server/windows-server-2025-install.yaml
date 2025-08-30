@@ -194,10 +194,9 @@
             Write-Host 'VirtIO ISO not found.'
           } else {
             Write-Host "Using VirtIO root: $root"
-            # Prefer NetKVM first to enable networking (try direct INF with pnputil)
+            # Prefer NetKVM first to enable networking (2k25 only)
             $nkCandidates = @(
-              (Join-Path $root 'NetKVM\2k19\amd64\netkvm.inf')
-              # Windows 2025 only; removed w10 path
+              (Join-Path $root 'NetKVM\2k25\amd64\netkvm.inf')
             )
             foreach ($nk in $nkCandidates) {
               if (Test-Path $nk) {
@@ -209,11 +208,10 @@
             }
 
             # Install a curated set of VirtIO drivers using pnputil; fall back to DISM recurse
-            $driverDirs = @('vioscsi','viostor','Balloon','vioinput','viorng','pvpanic','qxl','qxldod','vioser','NetKVM')
+            $driverDirs = @('vioscsi','viostor','Balloon','vioinput','viorng','pvpanic','qxl','qxldod','vioserial','NetKVM','viogpu','viofs','viosock')
             foreach ($d in $driverDirs) {
               $paths = @(
-                Join-Path $root ($d + '\\2k19\\amd64')
-                # Windows 2025 only; removed w10 path
+                (Join-Path $root ($d + '\\2k25\\amd64'))
               )
               foreach ($p in $paths) {
                 if (Test-Path $p) {
@@ -240,10 +238,15 @@
           REM Ensure target folder exists
           if not exist C:\\Windows\\Setup\\Scripts mkdir C:\\Windows\\Setup\\Scripts
           REM Copy script locally for reliability
-          copy /Y %SystemDrive%\\Windows\\Temp\\Install-VirtIO.ps1 nul 2>nul
-          if %ERRORLEVEL% NEQ 0 (
-              if exist D:\\Install-VirtIO.ps1 copy /Y D:\\Install-VirtIO.ps1 C:\\Windows\\Temp\\Install-VirtIO.ps1
+          if not exist C:\\Windows\\Temp\\Install-VirtIO.ps1 (
+            for %%%%L in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+              if exist %%%%L:\\Install-VirtIO.ps1 (
+                copy /Y %%%%L:\\Install-VirtIO.ps1 C:\\Windows\\Temp\\Install-VirtIO.ps1
+                goto :copied
+              )
+            )
           )
+          :copied
           powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\Install-VirtIO.ps1
 
     - name: Create Autounattend.xml for automated installation
@@ -393,66 +396,72 @@
                 <FirstLogonCommands>
                   <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Description>Install VirtIO NetKVM Driver</Description>
+                    <Description>Run VirtIO installer script from any CD-ROM</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\NetKVM\2k25\amd64\netkvm.inf (echo Installing NetKVM from D:\NetKVM\2k25\amd64\netkvm.inf &amp; pnputil /add-driver D:\NetKVM\2k25\amd64\netkvm.inf /install &amp; pnputil /scan-devices)</CommandLine>
+                    <CommandLine>cmd /c for %%%%L in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do (if exist %%%%L:\\Install-VirtIO.ps1 (copy /Y %%%%L:\\Install-VirtIO.ps1 C:\\Windows\\Temp\\Install-VirtIO.ps1 &amp; powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\Install-VirtIO.ps1 &amp; goto :done_inst)) &amp; :done_inst</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>2</Order>
-                    <Description>Install VirtIO RNG (viorng)</Description>
+                    <Description>Install VirtIO NetKVM Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\viorng\2k25\amd64\viorng.inf (echo Installing VirtIO RNG drivers &amp; pnputil /add-driver D:\viorng\2k25\amd64\viorng.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\NetKVM\\2k25\\amd64\\netkvm.inf (echo Installing NetKVM from D:\\NetKVM\\2k25\\amd64\\netkvm.inf &amp; pnputil /add-driver D:\\NetKVM\\2k25\\amd64\\netkvm.inf /install &amp; pnputil /scan-devices)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>3</Order>
-                    <Description>Install VirtIO Balloon Driver</Description>
+                    <Description>Install VirtIO RNG (viorng)</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\Balloon\2k25\amd64\balloon.inf (echo Installing VirtIO Balloon drivers &amp; pnputil /add-driver D:\Balloon\2k25\amd64\balloon.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\viorng\\2k25\\amd64\\viorng.inf (pnputil /add-driver D:\\viorng\\2k25\\amd64\\viorng.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>4</Order>
-                    <Description>Install VirtIO Serial Driver</Description>
+                    <Description>Install VirtIO Balloon Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\vioserial\2k25\amd64\vioser.inf (echo Installing VirtIO Serial drivers &amp; pnputil /add-driver D:\vioserial\2k25\amd64\vioser.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\Balloon\\2k25\\amd64\\balloon.inf (pnputil /add-driver D:\\Balloon\\2k25\\amd64\\balloon.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>5</Order>
-                    <Description>Install VirtIO SCSI Driver</Description>
+                    <Description>Install VirtIO Serial Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\vioscsi\2k25\amd64\vioscsi.inf (echo Installing VirtIO SCSI drivers &amp; pnputil /add-driver D:\vioscsi\2k25\amd64\vioscsi.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\vioserial\\2k25\\amd64\\vioser.inf (pnputil /add-driver D:\\vioserial\\2k25\\amd64\\vioser.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>6</Order>
-                    <Description>Install VirtIO Input (Tablet/HID) Driver</Description>
+                    <Description>Install VirtIO SCSI Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\vioinput\2k25\amd64\vioinput.inf (echo Installing VirtIO Input drivers &amp; pnputil /add-driver D:\vioinput\2k25\amd64\vioinput.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\vioscsi\\2k25\\amd64\\vioscsi.inf (pnputil /add-driver D:\\vioscsi\\2k25\\amd64\\vioscsi.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>7</Order>
-                    <Description>Install VirtIO GPU DOD Driver</Description>
+                    <Description>Install VirtIO Input (Tablet/HID) Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\viogpu\2k25\amd64\viogpudo.inf (echo Installing VirtIO GPU DOD driver &amp; pnputil /add-driver D:\viogpu\2k25\amd64\viogpudo.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\vioinput\\2k25\\amd64\\vioinput.inf (pnputil /add-driver D:\\vioinput\\2k25\\amd64\\vioinput.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>8</Order>
-                    <Description>Install Remaining VirtIO Drivers (bulk)</Description>
+                    <Description>Install VirtIO GPU DOD Driver</Description>
                     <RequiresUserInput>false</RequiresUserInput>
-                    <CommandLine>cmd /c if exist D:\ (for %%D in (viostor viofs viosock qxl pvpanic) do if exist D:\%%D\2k25\amd64\*.inf pnputil /add-driver D:\%%D\2k25\amd64\*.inf /install)</CommandLine>
+                    <CommandLine>cmd /c if exist D:\\viogpu\\2k25\\amd64\\viogpudo.inf (pnputil /add-driver D:\\viogpu\\2k25\\amd64\\viogpudo.inf /install)</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
                     <Order>9</Order>
+                    <Description>Install Remaining VirtIO Drivers (bulk)</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>cmd /c if exist D:\\ (for %%%%D in (viostor viofs viosock qxl pvpanic viorng vioserial) do if exist D:\\%%%%D\\2k25\\amd64\\*.inf pnputil /add-driver D:\\%%%%D\\2k25\\amd64\\*.inf /install)</CommandLine>
+                  </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>10</Order>
                     <Description>Enable Remote Desktop</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
-                    <Order>10</Order>
+                    <Order>11</Order>
                     <Description>Allow RDP through firewall</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>netsh advfirewall firewall set rule group="remote desktop" new enable=Yes</CommandLine>
                   </SynchronousCommand>
                   <SynchronousCommand wcm:action="add">
-                    <Order>11</Order>
+                    <Order>12</Order>
                     <Description>Enable WinRM</Description>
                     <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>winrm quickconfig -quiet</CommandLine>
@@ -476,6 +485,68 @@
       ansible.builtin.slurp:
         src: "{{ storage_dir }}/SetupComplete.cmd"
       register: setupcomplete_slurped
+
+    - name: Set default VirtIO ISO download URL when not provided
+      ansible.builtin.set_fact:
+        virtio_iso_download_url: "{{ virtio_iso_url | default('https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso') }}"
+
+    - name: Check if VirtIO ISO already exists in playbook directory
+      ansible.builtin.stat:
+        path: "./virtio-win.iso"
+      register: virtio_iso_local_exists
+
+    - name: Check if VirtIO ISO already exists in storage directory
+      ansible.builtin.stat:
+        path: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+      register: virtio_iso_storage_exists
+
+    - name: Download VirtIO driver ISO to playbook directory if not exists locally
+      ansible.builtin.get_url:
+        url: "{{ virtio_iso_download_url }}"
+        dest: "./virtio-win.iso"
+        mode: '0644'
+      when:
+        - virtio_iso_path is not defined
+        - not virtio_iso_local_exists.stat.exists
+      register: virtio_iso_download_result
+
+    - name: Copy VirtIO ISO from playbook directory to storage directory (always overwrite)
+      ansible.builtin.copy:
+        src: "./virtio-win.iso"
+        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+        mode: '0644'
+        force: yes
+      when:
+        - virtio_iso_path is not defined
+        - virtio_iso_local_exists.stat.exists or (virtio_iso_download_result is defined and virtio_iso_download_result.changed)
+      register: virtio_iso_copy_to_storage
+
+    - name: Display VirtIO ISO download status
+      ansible.builtin.debug:
+        msg: |
+          {% if virtio_iso_download_result is defined and virtio_iso_download_result.changed %}
+          Downloaded VirtIO ISO from {{ virtio_iso_download_url }} to ./virtio-win.iso
+          {% elif virtio_iso_copy_to_storage is defined and virtio_iso_copy_to_storage.changed %}
+          Copied existing VirtIO ISO from ./virtio-win.iso to storage directory
+          {% else %}
+          Using existing VirtIO ISO in storage directory
+          {% endif %}
+      when: virtio_iso_path is not defined
+
+    - name: Copy VirtIO driver ISO from custom path (always overwrite)
+      ansible.builtin.copy:
+        src: "{{ virtio_iso_path }}"
+        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+        mode: '0644'
+        force: yes
+      when:
+        - virtio_iso_path is defined
+      register: virtio_iso_copy_result
+
+    - name: Display VirtIO ISO copy status
+      ansible.builtin.debug:
+        msg: "{{ 'Copied VirtIO ISO from ' + virtio_iso_path if (virtio_iso_copy_result is defined and virtio_iso_copy_result.changed) else 'Using existing local VirtIO ISO at ' + storage_dir + '/win2025server-virtio-iso/disk.img' }}"
+      when: virtio_iso_path is defined
 
     - name: Create Sysprep Secret with unattend files
       kubernetes.core.k8s:
@@ -665,6 +736,10 @@
                         disk:
                           bus: sata
                         bootOrder: 1
+                      - name: virtio-iso
+                        cdrom:
+                          bus: sata
+                        bootOrder: 3
                       - name: sysprep
                         cdrom:
                           bus: sata
@@ -688,6 +763,9 @@
                   - name: disk0
                     persistentVolumeClaim:
                       claimName: "{{ vm_name }}-system-pvc"
+                  - name: virtio-iso
+                    persistentVolumeClaim:
+                      claimName: "{{ vm_name }}-virtio-iso-pvc"
                   - name: sysprep
                     sysprep:
                       secret:
