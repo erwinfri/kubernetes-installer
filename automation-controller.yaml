@@ -1,0 +1,46 @@
+---
+# automation-controller.yaml
+# Top-level playbook to manage WinRM port-forward and run windows-automation.yaml
+
+- hosts: localhost
+  gather_facts: false
+  vars:
+    vm_name: "win2019server"
+    kubevirt_namespace: "kubevirt"
+    winrm_port: 5985
+    portforward_pid_file: "/tmp/winrm-portforward.pid"
+    portforward_log_file: "/tmp/winrm-portforward.log"
+  tasks:
+    - name: Ensure start_portforward.sh is executable
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/library/start_portforward.sh"
+        mode: '0755'
+        state: file
+
+    - name: Start WinRM port-forward using wrapper shell script
+      ansible.builtin.shell: |
+        ./library/start_portforward.sh {{ vm_name }}-winrm {{ winrm_port }} {{ kubevirt_namespace }} {{ portforward_log_file }} {{ portforward_pid_file }}
+      args:
+        chdir: "{{ playbook_dir }}"
+      changed_when: false
+
+    - name: Wait for WinRM port-forward to be ready
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ winrm_port }}"
+        delay: 1
+        timeout: 20
+
+  # To run the Windows automation, execute windows-automation.yaml as a separate playbook after this one completes.
+  # Or create a main playbook that lists both as top-level import_playbook entries.
+
+    - name: Stop WinRM port-forward process (shell)
+      ansible.builtin.shell: |
+        if [ -f {{ portforward_pid_file }} ]; then
+          kill $(cat {{ portforward_pid_file }}) 2>/dev/null || true
+          rm -f {{ portforward_pid_file }}
+        else
+          fuser -k {{ winrm_port }}/tcp || pkill -f "port-forward.*{{ winrm_port }}" || true
+        fi
+      ignore_errors: true
+      changed_when: false

@@ -1,3 +1,5 @@
 *.vhd
 *.vhdx
 *.iso
+*.exe
+*.log
