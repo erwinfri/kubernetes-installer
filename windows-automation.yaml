@@ -1,0 +1,645 @@
+# Windows Server Automation Playbook
+# This playbook demonstrates various methods to automate Windows Server 2019/2025 VM
+
+- name: Generic Windows Server Automation
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vm_name: "{{ vm_name | default('win2025server') }}"
+    kubevirt_namespace: "kubevirt"
+    windows_vm_ip: ""
+    windows_admin_password: "SecureP@ssw0rd!"
+    sa_password: "SecureP@ssw0rd!"
+    otel: false
+    otel_observe_token: ""
+    otel_observe_endpoint: ""
+  tasks:
+    - name: Start WinRM port-forward using start_portforward.sh
+      ansible.builtin.shell: |
+        ./library/start_portforward.sh {{ vm_name }}-winrm 5985 {{ kubevirt_namespace }} /tmp/winrm-portforward.log /tmp/winrm-portforward.pid
+      args:
+        chdir: "{{ playbook_dir | default('.') }}"
+      register: port_forward_result
+
+    - name: Get VM info for WinRM port forward
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: vmi_info
+
+    - name: Set VM IP from Kubernetes
+      ansible.builtin.set_fact:
+        windows_vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
+      when: vmi_info.resources | length > 0
+
+    - name: Display VM connection info
+      ansible.builtin.debug:
+        msg:
+          - "️  Windows VM Information:"
+          - "  VM Name: {{ vm_name }}"
+          - "  IP Address: {{ windows_vm_ip }}"
+          - "  Admin Password: {{ windows_admin_password }}"
+    # ...existing tasks...
+
+    # --- DEBUG/DIAG TASKS FOR OTEL ---
+    - name: List files in C:\Data\otelcol (debug)
+      win_shell: |
+        dir /B C:\Data\otelcol
+      args:
+        executable: cmd.exe
+      register: otelcol_dir_listing
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: List files in C:\Data (debug)
+      win_shell: |
+        dir /B C:\Data
+      args:
+        executable: cmd.exe
+      register: data_dir_listing
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Show otelcol directory listing (debug)
+      debug:
+        var: otelcol_dir_listing.stdout_lines
+      when: otel | bool
+
+    - name: Show data directory listing (debug)
+      debug:
+        var: data_dir_listing.stdout_lines
+      when: otel | bool
+
+    - name: Show first 20 lines of otel-config.yaml (debug)
+      win_shell: |
+        powershell -Command "Get-Content -Path 'C:\Data\otel-config.yaml' -TotalCount 20"
+      args:
+        executable: cmd.exe
+      register: otel_config_head
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Show otel-config.yaml head (debug)
+      debug:
+        var: otel_config_head.stdout_lines
+      when: otel | bool
+# Windows Server Automation Playbook
+# This playbook demonstrates various methods to automate Windows Server 2019/2025 VM
+
+- name: Generic Windows Server Automation
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vm_name: "{{ vm_name | default('win2025server') }}"
+    kubevirt_namespace: "kubevirt"
+    windows_vm_ip: ""
+    windows_admin_password: "SecureP@ssw0rd!"
+    sa_password: "SecureP@ssw0rd!"
+    otel: false
+    otel_observe_token: ""
+    otel_observe_endpoint: ""
+
+  tasks:
+    - name: Start WinRM port-forward using start_portforward.sh
+      ansible.builtin.shell: |
+        ./library/start_portforward.sh {{ vm_name }}-winrm 5985 {{ kubevirt_namespace }} /tmp/winrm-portforward.log /tmp/winrm-portforward.pid
+      args:
+        chdir: "{{ playbook_dir | default('.') }}"
+      register: port_forward_result
+
+    - name: Get VM info for WinRM port forward
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ kubevirt_namespace }}"
+      register: vmi_info
+
+    - name: Set VM IP from Kubernetes
+      ansible.builtin.set_fact:
+        windows_vm_ip: "{{ vmi_info.resources[0].status.interfaces[0].ipAddress }}"
+      when: vmi_info.resources | length > 0
+
+    - name: Display VM connection info
+      ansible.builtin.debug:
+        msg:
+          - "️  Windows VM Information:"
+          - "  VM Name: {{ vm_name }}"
+          - "  IP Address: {{ windows_vm_ip }}"
+          - "  Admin Password: {{ windows_admin_password }}"
+
+    - name: Test WinRM connection via localhost
+      ansible.builtin.uri:
+        url: "http://localhost:5985/wsman"
+        method: POST
+        headers:
+          Content-Type: "application/soap+xml;charset=UTF-8"
+          SOAPAction: "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate"
+        body: |
+          <?xml version="1.0" encoding="utf-8"?>
+          <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+            <s:Header>
+              <a:Action xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate</a:Action>
+              <a:To xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://localhost:5985/wsman</a:To>
+            </s:Header>
+            <s:Body>
+              <n:Enumerate xmlns:n="http://schemas.xmlsoap.org/ws/2004/09/enumeration">
+                <w:ResourceURI xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">http://schemas.microsoft.com/wbem/wsman/1/windows/shell</w:ResourceURI>
+              </n:Enumerate>
+            </s:Body>
+          </s:Envelope>
+        status_code: [200, 401, 500]
+      register: winrm_test
+      ignore_errors: true
+
+    - name: Query Windows version via WinRM
+      win_shell: |
+        Get-WmiObject -Class Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber
+      register: win_version
+      delegate_to: localhost
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: mssql_install | default(false) | bool
+
+    - name: Show Windows version (WinRM)
+      debug:
+        var: win_version.stdout
+      when: mssql_install | default(false) | bool
+
+    - name: Display WinRM test result
+      ansible.builtin.debug:
+        msg:
+          - "WinRM Test Result: {{ winrm_test.status | default('Failed') }}"
+          - "{{ 'WinRM is responding!' if winrm_test.status in [401, 500] else 'WinRM not ready yet' }}"
+
+    - name: Create C:\Data directory for MSSQL (WinRM)
+      win_file:
+        path: "C:\\Data"
+        state: directory
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: mssql_install | default(false) | bool
+
+    - name: Check if installer exists on controller before copy
+      stat:
+        path: "./MS_SQL_2025.exe"
+      register: installer_stat
+      delegate_to: localhost
+      when: mssql_install | default(false) | bool
+
+    - name: Fail if installer is missing on controller
+      fail:
+        msg: "Installer ./MS_SQL_2025.exe does not exist on controller!"
+      when: mssql_install | default(false) | bool and not installer_stat.stat.exists
+
+    - name: Copy MS SQL installer exe to Windows VM (WinRM)
+      win_copy:
+        src: "./MS_SQL_2025.exe"
+        dest: "C:\\Data\\MS_SQL_2025.exe"
+        force: yes
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      register: win_copy_result
+      when: mssql_install | default(false) | bool and installer_stat.stat.exists
+
+
+
+    - name: Install MS SQL Server 2025 using installer exe (WinRM)
+      win_shell: |
+        $p = Start-Process -FilePath "C:\Data\MS_SQL_2025.exe" -ArgumentList '/Action=Install /IAcceptSqlServerLicenseTerms /Quiet /InstallPath=C:\Data /Language=en-US' -NoNewWindow -Wait -PassThru
+        Write-Host "ExitCode: $($p.ExitCode)"
+      args:
+        executable: powershell.exe
+      register: mssql_install_result
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: mssql_install | default(false) | bool and installer_stat.stat.exists
+
+    - name: Show MS SQL install result (WinRM)
+      debug:
+        msg:
+          - "MS SQL install stdout: {{ mssql_install_result.stdout }}"
+          - "MS SQL install stderr: {{ mssql_install_result.stderr }}"
+      when: mssql_install | default(false) | bool
+
+    - name: Verify SQL Server service is installed and running (WinRM)
+      win_shell: |
+        Get-Service -Name 'MSSQLSERVER' | Select-Object Status, Name, DisplayName
+      register: mssql_service_status
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: mssql_install | default(false) | bool
+
+    - name: Show SQL Server service status (WinRM)
+      debug:
+        var: mssql_service_status.stdout
+      when: mssql_install | default(false) | bool
+
+    - name: Show MS SQL install result (WinRM)
+      debug:
+        var: mssql_install_result.stdout
+      when: mssql_install | default(false) | bool
+
+
+  # --- OpenTelemetry: Deploy otel-config.yaml if enabled ---
+    - name: Create otel-config.yaml from template
+      ansible.builtin.copy:
+        dest: C:\Data\otel-config.yaml
+        content: |
+          receivers:
+            windowsperfcounters:
+              collection_interval: 30s
+              metrics:
+                system.cpu.time:
+                  description: CPU usage percentage
+                  unit: "%"
+                  gauge:
+              perfcounters:
+                - object: Processor
+                  instances: "_Total"
+                  counters:
+                    - name: "% Processor Time"
+                      metric: system.cpu.time
+                      attributes:
+                        state: active
+
+          exporters:
+            otlphttp:
+              endpoint: "{{ otel_observe_endpoint | default('https://YOUR_OTEL_ENDPOINT/v2/otel') }}"
+              headers:
+                authorization: "Bearer {{ otel_observe_token | default('YOUR_TOKEN') }}"
+
+          service:
+            pipelines:
+              metrics:
+                receivers: [windowsperfcounters]
+                exporters: [otlphttp]
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+
+    # --- OpenTelemetry Collector Installation and Service Setup ---
+    - name: Ensure Data folder exists
+      win_file:
+        path: "C:\\Data"
+        state: directory
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Ensure Temp folder exists
+      win_file:
+        path: "C:\\Data\\temp"
+        state: directory
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Fetch latest OTel Collector release info from GitHub
+      uri:
+        url: https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/releases/latest
+        return_content: yes
+      register: otel_release
+      delegate_to: localhost
+      when: otel | bool
+
+    - name: Download OTel Collector contrib tar.gz to temp folder
+      win_get_url:
+        url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.133.0/otelcol-contrib_0.133.0_windows_amd64.tar.gz"
+        dest: "C:\\Data\\temp\\otelcol-contrib_0.133.0_windows_amd64.tar.gz"
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Show available OTel Collector asset names (debug)
+      debug:
+        msg: "Available assets: {{ otel_release.json.assets | map(attribute='name') | list }}"
+      when: otel | bool
+
+
+    - name: Fail if no Windows AMD64 tar.gz asset found
+      fail:
+        msg: "No windows_amd64.tar.gz asset found in OTel Collector GitHub release. See previous debug output for available assets."
+      when: otel | bool and (otel_release.json.assets | selectattr('name', 'search', 'windows_amd64.tar.gz') | list | length == 0)
+
+    - name: Parse download URL for Windows AMD64 tar.gz
+      set_fact:
+        otel_targz_url: "{{ otel_release.json.assets | selectattr('name', 'search', 'windows_amd64.tar.gz') | map(attribute='browser_download_url') | list | first }}"
+      when: otel | bool
+
+
+
+    - name: Download OTel Collector tar.gz to temp folder
+      win_get_url:
+        url: "{{ otel_targz_url }}"
+        dest: "C:\\Data\\temp\\otelcol-windows-amd64.tar.gz"
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+
+    - name: Ensure OTel Collector temp extract directory exists (before tar, unconditional)
+      win_file:
+        path: "C:\\Data\\otelcol-tmp"
+        state: directory
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+
+    - name: "Debug: Checking if C:\\Data\\otelcol-tmp exists"
+      win_stat:
+        path: "C:\\Data\\otelcol-tmp"
+      register: otelcol_tmp_dir
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+
+    - name: Fail if C:\Data\otelcol-tmp does not exist
+      fail:
+        msg: "C:\\Data\\otelcol-tmp directory does not exist before tar extraction!"
+      when: not otelcol_tmp_dir.stat.exists
+
+    - name: Extract OTel Collector tar.gz on Windows
+      win_shell: |
+        tar -xf C:\Data\temp\otelcol-windows-amd64.tar.gz -C C:\Data\otelcol-tmp
+      args:
+        executable: cmd.exe
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+    - name: Extract OTel Collector contrib tar.gz on Windows
+      win_shell: |
+        tar -xf C:\Data\temp\otelcol-contrib_0.133.0_windows_amd64.tar.gz -C C:\Data\otelcol-tmp
+      args:
+        executable: cmd.exe
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+
+    - name: Ensure OTel Collector install directory exists
+      win_file:
+        path: "C:\\Data\\otelcol"
+        state: directory
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: List files in C:\Data\otelcol-tmp after extraction (debug)
+      win_shell: |
+        dir /S /B C:\Data\otelcol-tmp
+      args:
+        executable: cmd.exe
+      register: otelcol_tmp_listing
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Show otelcol-tmp directory listing (debug)
+      debug:
+        var: otelcol_tmp_listing.stdout_lines
+      when: otel | bool
+
+    - name: Copy otelcol-contrib.exe to install directory
+      win_shell: |
+        copy /Y C:\Data\otelcol-tmp\otelcol-contrib.exe C:\Data\otelcol\otelcol-contrib.exe
+      args:
+        executable: cmd.exe
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Verify OTel config file exists on remote host
+      win_stat:
+        path: "C:\\Data\\otel-config.yaml"
+      register: config_file
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Fail if config file is missing
+      fail:
+        msg: "OTel config file not found at C:\\Data\\otel-config.yaml on remote host"
+      when: otel | bool and not config_file.stat.exists
+
+    - name: Remove existing OTel Collector service if exists
+      win_service:
+        name: otelcollector
+        state: absent
+      ignore_errors: yes
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+    - name: Pause after removing service
+      ansible.builtin.pause:
+        seconds: 3
+      when: otel | bool
+
+    - name: Create Windows service for OTel Collector (contrib)
+      win_shell: |
+        sc.exe create "otelcollector" binPath= "C:\Data\otelcol\otelcol-contrib.exe --config C:\Data\otel-config.yaml" start=auto
+      args:
+        creates: 'C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local\\otelcollector.service'
+        executable: cmd.exe
+      vars:
+        ansible_connection: winrm
+        ansible_user: Administrator
+        ansible_password: "{{ windows_admin_password }}"
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_winrm_port: 5985
+        ansible_winrm_scheme: http
+        ansible_host: localhost
+      when: otel | bool
+
+
+#    - name: Start OTel Collector service
+#      win_service:
+#        name: otelcollector
+#        start_mode: auto
+#        state: started
+#      vars:
+#        ansible_connection: winrm
+#        ansible_user: Administrator
+#        ansible_password: "{{ windows_admin_password }}"
+#        ansible_winrm_transport: basic
+#        ansible_winrm_server_cert_validation: ignore
+#        ansible_winrm_port: 5985
+#        ansible_winrm_scheme: http
+#        ansible_host: localhost
+#      when: otel | bool
+
+
+    - name: Stop WinRM port-forward
+      ansible.builtin.shell: |
+        if [ -f /tmp/winrm-portforward.pid ]; then
+          kill $(cat /tmp/winrm-portforward.pid) && rm -f /tmp/winrm-portforward.pid
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: true
+
+    - name: Display automation summary
+      ansible.builtin.debug:
+        msg:
+          - " Windows Automation Setup Complete!"
+          - "Use inventory at /tmp/windows-inventory.yml with ansible-playbook"

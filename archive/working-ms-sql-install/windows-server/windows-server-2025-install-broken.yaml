@@ -1,0 +1,670 @@
+---
+# Windows Server 2025 Installation Tasks
+# This file handles the complete installation of Windows Server 2025 VM
+# Called by unified controller when windows_version=2025
+
+- name: Check if Windows Server 2025 VHDX file exists
+  ansible.builtin.stat:
+    path: "{{ vhd_path }}"
+  register: vhd_stat
+
+- name: Download Windows Server 2025 VHDX if not present
+  ansible.builtin.get_url:
+    url: "{{ vhd_download_url }}"
+    dest: "{{ vhd_path }}"
+    mode: '0644'
+  when: not vhd_stat.stat.exists
+  register: vhd_download_result
+
+- name: Re-check VHDX file after potential download
+  ansible.builtin.stat:
+    path: "{{ vhd_path }}"
+  register: vhd_stat_final
+
+- name: Display VHDX file information
+  ansible.builtin.debug:
+    msg:
+      - "Windows Server 2025 VHDX found: {{ vhd_path }}"
+      - "Size: {{ (vhd_stat_final.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
+      - "{{ 'Downloaded successfully' if vhd_download_result.changed else 'Using existing local file' }}"
+
+- name: Ensure KubeVirt namespace exists
+  kubernetes.core.k8s:
+    name: "{{ kubevirt_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Check if KubeVirt is deployed and ready
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: KubeVirt
+    name: kubevirt
+    namespace: kubevirt
+  register: kubevirt_status
+
+- name: Display KubeVirt status
+  ansible.builtin.debug:
+    msg: "✅ KubeVirt is ready: {{ kubevirt_status.resources[0].status.phase }}"
+
+- name: Check if Windows Server VM already exists
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachine
+    name: "{{ vm_name }}"
+    namespace: "{{ kubevirt_namespace }}"
+  register: existing_vm
+
+- name: Display existing installation warning
+  ansible.builtin.debug:
+    msg: "⚠️  VM {{ vm_name }} already exists in namespace {{ kubevirt_namespace }}. This deployment will update the existing VM."
+  when: existing_vm.resources | length > 0
+
+- name: Ensure qemu-img is installed
+  ansible.builtin.package:
+    name: qemu-utils
+    state: present
+
+- name: Ensure parted is installed (for partition table detection)
+  ansible.builtin.package:
+    name: parted
+    state: present
+
+- name: Detect source VHDX format (vhd/vpc vs vhdx)
+  ansible.builtin.shell: |
+    qemu-img info "{{ vhd_path }}" | grep "file format"
+  register: vhd_format_check
+  changed_when: false
+
+- name: Set qemu-img source format fact
+  ansible.builtin.set_fact:
+    qemu_source_format: "{{ 'vhdx' if 'vhdx' in vhd_format_check.stdout else 'vpc' }}"
+
+- name: Create base storage directory
+  ansible.builtin.file:
+    path: "{{ storage_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Check available disk space
+  ansible.builtin.shell: |
+    df -h "{{ storage_dir }}" | tail -1 | awk '{print $4}'
+  register: available_space
+  changed_when: false
+
+- name: Display storage information
+  ansible.builtin.debug:
+    msg:
+      - "📁 Storage directory: {{ storage_dir }}"
+      - "💾 Available space: {{ available_space.stdout }}"
+      - "📊 VHDX file size: {{ (vhd_stat_final.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
+      - "📊 Required space: ~{{ system_disk_size }} (system) + 15Gi (installer request)"
+
+- name: Create directory structure for storage
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  with_items:
+    - "{{ storage_dir }}/{{ vm_name }}-system-disk"
+    - "{{ storage_dir }}/{{ vm_name }}-installer"
+    - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
+
+- name: Create blank system disk image (30Gi by default for 2025)
+  ansible.builtin.shell: |
+    DST={{ storage_dir }}/{{ vm_name }}-system-disk/disk.img
+    if [ -f "$DST" ]; then
+      echo "System disk already exists: $DST"
+    else
+      qemu-img create -f raw "$DST" {{ system_disk_size | default('30Gi') }}
+      echo "Created blank system disk: $DST (size={{ system_disk_size | default('30Gi') }})"
+    fi
+  register: system_disk_result
+
+- name: Prepare installer VHDX as separate disk (convert to raw) with correct source format
+  ansible.builtin.shell: |
+    DST={{ storage_dir }}/{{ vm_name }}-installer/disk.img
+    if [ -f "$DST" ]; then
+      echo "Installer disk already prepared: $DST"
+    else
+      qemu-img convert -f {{ qemu_source_format }} -O raw "{{ vhd_path }}" "$DST"
+      echo "Prepared installer disk from VHDX: $DST"
+    fi
+  register: installer_disk_result
+
+- name: Detect partition table on converted installer disk (GPT vs MBR)
+  ansible.builtin.shell: |
+    DST={{ storage_dir }}/{{ vm_name }}-installer/disk.img
+    parted -s "$DST" print 2>/dev/null | grep -E "Partition Table|label" | tail -1 | awk '{print $NF}' || echo "unknown"
+  register: partition_table_check
+  changed_when: false
+
+- name: Decide boot mode based on partition table (EFI for GPT, BIOS for msdos)
+  ansible.builtin.set_fact:
+    boot_mode: "{{ 'efi' if 'gpt' in partition_table_check.stdout else 'bios' }}"
+
+- name: Compute VM bootloader structure (as JSON for safe insertion)
+  ansible.builtin.set_fact:
+    vm_bootloader_json: >-
+      {{ '{"efi": {"secureBoot": false}}' if boot_mode == 'efi' else '{"bios": {}}' }}
+
+- name: Set default VirtIO ISO download URL when not provided
+  ansible.builtin.set_fact:
+    virtio_iso_url: "{{ virtio_iso_url | default('https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso') }}"
+
+- name: Download VirtIO driver ISO (latest) if no local path provided
+  ansible.builtin.get_url:
+    url: "{{ virtio_iso_url }}"
+    dest: "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
+    mode: '0644'
+  when: virtio_iso_path is not defined
+
+- name: Copy VirtIO driver ISO (requires virtio_iso_path variable)
+  ansible.builtin.copy:
+    src: "{{ virtio_iso_path }}"
+    dest: "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
+    mode: '0644'
+  when: virtio_iso_path is defined
+
+- name: Display disk creation result
+  ansible.builtin.debug:
+    msg:
+      - "System disk already exists: {{ storage_dir }}/{{ vm_name }}-system-disk/disk.img"
+      - "Installer disk already prepared: {{ storage_dir }}/{{ vm_name }}-installer/disk.img"
+      - "Detected source VHDX format: {{ qemu_source_format }}"
+      - "Detected installer partition table: {{ partition_table_check.stdout }}"
+      - "Selected boot mode: {{ boot_mode }}"
+
+- name: Create Install-VirtIO.ps1 script (used during setup and as fallback)
+  ansible.builtin.copy:
+    dest: "{{ storage_dir }}/Install-VirtIO.ps1"
+    mode: '0644'
+    content: |
+      # VirtIO Driver Installation Script for Windows Server 2025
+      Write-Host "Installing VirtIO drivers for Windows Server 2025..."
+      
+      $virtioPath = "E:\"
+      if (Test-Path $virtioPath) {
+          Write-Host "VirtIO ISO found at $virtioPath"
+          
+          # Install network driver
+          $netPath = "$virtioPath\NetKVM\2k25\amd64"
+          if (Test-Path $netPath) {
+              pnputil.exe /add-driver "$netPath\*.inf" /install
+              Write-Host "Network driver installed"
+          }
+          
+          # Install storage driver
+          $storagePath = "$virtioPath\viostor\2k25\amd64"
+          if (Test-Path $storagePath) {
+              pnputil.exe /add-driver "$storagePath\*.inf" /install
+              Write-Host "Storage driver installed"
+          }
+          
+          # Install balloon driver
+          $balloonPath = "$virtioPath\Balloon\2k25\amd64"
+          if (Test-Path $balloonPath) {
+              pnputil.exe /add-driver "$balloonPath\*.inf" /install
+              Write-Host "Balloon driver installed"
+          }
+          
+          Write-Host "VirtIO drivers installation completed"
+      } else {
+          Write-Host "VirtIO ISO not found at $virtioPath"
+      }
+
+- name: Create SetupComplete.cmd (fallback to ensure drivers installation runs at end of setup)
+  ansible.builtin.copy:
+    dest: "{{ storage_dir }}/SetupComplete.cmd"
+    mode: '0644'
+    content: |
+      @echo off
+      echo Running SetupComplete.cmd for Windows Server 2025...
+      powershell.exe -ExecutionPolicy Bypass -File "C:\Install-VirtIO.ps1"
+      echo SetupComplete.cmd finished.
+
+- name: Create Autounattend.xml for automated installation
+  ansible.builtin.copy:
+    dest: "{{ storage_dir }}/Autounattend.xml"
+    mode: '0644'
+    content: |
+      <?xml version="1.0" encoding="utf-8"?>
+      <unattend xmlns="urn:schemas-microsoft-com:unattend">
+        <settings pass="windowsPE">
+          <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <SetupUILanguage>
+              <UILanguage>en-US</UILanguage>
+            </SetupUILanguage>
+            <InputLocale>en-US</InputLocale>
+            <SystemLocale>en-US</SystemLocale>
+            <UILanguage>en-US</UILanguage>
+            <UserLocale>en-US</UserLocale>
+          </component>
+          <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <DiskConfiguration>
+              <Disk wcm:action="add">
+                <CreatePartitions>
+                  <CreatePartition wcm:action="add">
+                    <Order>1</Order>
+                    <Type>Primary</Type>
+                    <Extend>true</Extend>
+                  </CreatePartition>
+                </CreatePartitions>
+                <ModifyPartitions>
+                  <ModifyPartition wcm:action="add">
+                    <Active>true</Active>
+                    <Format>NTFS</Format>
+                    <Label>Windows</Label>
+                    <Order>1</Order>
+                    <PartitionID>1</PartitionID>
+                  </ModifyPartition>
+                </ModifyPartitions>
+                <DiskID>1</DiskID>
+                <WillWipeDisk>true</WillWipeDisk>
+              </Disk>
+            </DiskConfiguration>
+            <ImageInstall>
+              <OSImage>
+                <InstallTo>
+                  <DiskID>1</DiskID>
+                  <PartitionID>1</PartitionID>
+                </InstallTo>
+              </OSImage>
+            </ImageInstall>
+            <UserData>
+              <AcceptEula>true</AcceptEula>
+              <FullName>Administrator</FullName>
+              <Organization></Organization>
+              {% if windows_product_key %}
+              <ProductKey>
+                <Key>{{ windows_product_key }}</Key>
+              </ProductKey>
+              {% endif %}
+            </UserData>
+          </component>
+        </settings>
+        <settings pass="specialize">
+          <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <ComputerName>WIN2025-SERVER</ComputerName>
+            <CopyProfile>false</CopyProfile>
+          </component>
+        </settings>
+        <settings pass="oobeSystem">
+          <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <OOBE>
+              <HideEULAPage>true</HideEULAPage>
+              <HideLocalAccountScreen>true</HideLocalAccountScreen>
+              <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+              <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+              <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+              <NetworkLocation>Work</NetworkLocation>
+              <ProtectYourPC>1</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+              <AdministratorPassword>
+                <Value>{{ windows_admin_password }}</Value>
+                <PlainText>true</PlainText>
+              </AdministratorPassword>
+            </UserAccounts>
+            <AutoLogon>
+              <Password>
+                <Value>{{ windows_admin_password }}</Value>
+                <PlainText>true</PlainText>
+              </Password>
+              <Enabled>true</Enabled>
+              <Username>Administrator</Username>
+            </AutoLogon>
+            <FirstLogonCommands>
+              <SynchronousCommand wcm:action="add">
+                <CommandLine>powershell.exe -ExecutionPolicy Bypass -File "C:\Install-VirtIO.ps1"</CommandLine>
+                <Description>Install VirtIO Drivers</Description>
+                <Order>1</Order>
+              </SynchronousCommand>
+              <SynchronousCommand wcm:action="add">
+                <CommandLine>powershell.exe -Command "Enable-WindowsOptionalFeature -Online -FeatureName IIS-WebServerRole"</CommandLine>
+                <Description>Enable IIS</Description>
+                <Order>2</Order>
+              </SynchronousCommand>
+              <SynchronousCommand wcm:action="add">
+                <CommandLine>powershell.exe -Command "Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name 'fDenyTSConnections' -Value 0"</CommandLine>
+                <Description>Enable RDP</Description>
+                <Order>3</Order>
+              </SynchronousCommand>
+              <SynchronousCommand wcm:action="add">
+                <CommandLine>powershell.exe -Command "Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'"</CommandLine>
+                <Description>Enable RDP Firewall</Description>
+                <Order>4</Order>
+              </SynchronousCommand>
+            </FirstLogonCommands>
+          </component>
+        </settings>
+      </unattend>
+
+- name: Load Autounattend.xml content
+  ansible.builtin.slurp:
+    src: "{{ storage_dir }}/Autounattend.xml"
+  register: autounattend_content
+
+- name: Load Install-VirtIO.ps1 content
+  ansible.builtin.slurp:
+    src: "{{ storage_dir }}/Install-VirtIO.ps1"
+  register: virtio_script_content
+
+- name: Load SetupComplete.cmd content
+  ansible.builtin.slurp:
+    src: "{{ storage_dir }}/SetupComplete.cmd"
+  register: setupcomplete_content
+
+- name: Create Sysprep Secret with unattend files
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ vm_name }}-sysprep"
+        namespace: "{{ kubevirt_namespace }}"
+      type: Opaque
+      data:
+        Autounattend.xml: "{{ autounattend_content.content }}"
+        Install-VirtIO.ps1: "{{ virtio_script_content.content }}"
+        SetupComplete.cmd: "{{ setupcomplete_content.content }}"
+
+- name: Display unattend configuration
+  ansible.builtin.debug:
+    msg:
+      - "📋 Unattend.xml Configuration:"
+      - "  - Administrator Password: {{ windows_admin_password }}"
+      - "  - Sysprep Secret: {{ vm_name }}-sysprep (Autounattend.xml)"
+
+- name: Create local storage class
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: local-storage
+      provisioner: kubernetes.io/no-provisioner
+      volumeBindingMode: WaitForFirstConsumer
+
+- name: Get node hostname for affinity
+  ansible.builtin.shell: hostname
+  register: node_hostname
+  changed_when: false
+
+- name: Create PersistentVolumes
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: "{{ item.name }}"
+      spec:
+        capacity:
+          storage: "{{ item.size }}"
+        accessModes: "{{ item.access_modes }}"
+        persistentVolumeReclaimPolicy: Delete
+        storageClassName: local-storage
+        local:
+          path: "{{ storage_dir }}/{{ item.path }}"
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "{{ node_hostname.stdout }}"
+  with_items:
+    - { name: "{{ vm_name }}-installer-pv", size: "15Gi", access_modes: ["ReadWriteOnce"], path: "{{ vm_name }}-installer" }
+    - { name: "{{ vm_name }}-system-pv", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"], path: "{{ vm_name }}-system-disk" }
+    - { name: "{{ vm_name }}-virtio-iso-pv", size: "1Gi", access_modes: ["ReadOnlyMany"], path: "{{ vm_name }}-virtio-iso" }
+
+- name: Create PersistentVolumeClaims
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ kubevirt_namespace }}"
+      spec:
+        accessModes: "{{ item.access_modes }}"
+        resources:
+          requests:
+            storage: "{{ item.size }}"
+        storageClassName: local-storage
+  with_items:
+    - { name: "{{ vm_name }}-installer-pvc", size: "15Gi", access_modes: ["ReadWriteOnce"] }
+    - { name: "{{ vm_name }}-system-pvc", size: "{{ system_disk_size }}", access_modes: ["ReadWriteOnce"] }
+    - { name: "{{ vm_name }}-virtio-iso-pvc", size: "1Gi", access_modes: ["ReadOnlyMany"] }
+
+- name: Build VirtualMachine definition
+  ansible.builtin.set_fact:
+    vm_definition:
+      apiVersion: kubevirt.io/v1
+      kind: VirtualMachine
+      metadata:
+        name: "{{ vm_name }}"
+        namespace: "{{ kubevirt_namespace }}"
+        labels:
+          app: "{{ vm_name }}"
+          os: windows
+          version: "2025"
+      spec:
+        runStrategy: RerunOnFailure
+        template:
+          metadata:
+            labels:
+              kubevirt.io/vm: "{{ vm_name }}"
+              os: windows
+              version: "2025"
+          spec:
+            domain:
+              cpu:
+                cores: "{{ vm_cpu_cores | int }}"
+                model: "{{ vm_cpu_model | default('host-model') }}"
+              memory:
+                guest: "{{ vm_memory }}"
+              machine:
+                type: q35
+              firmware:
+                bootloader: "{{ vm_bootloader_json | from_json }}"
+              features:
+                acpi: 
+                  enabled: true
+                apic: 
+                  enabled: true
+                hyperv:
+                  relaxed: 
+                    enabled: true
+                  vapic: 
+                    enabled: true
+                  spinlocks: 
+                    enabled: true
+                    retries: 8191
+                  vpindex: 
+                    enabled: true
+                  runtime: 
+                    enabled: true
+                  synic: 
+                    enabled: true
+                  stimer: 
+                    enabled: true
+                  reset: 
+                    enabled: true
+                  frequencies: 
+                    enabled: true
+                  reenlightenment: 
+                    enabled: true
+                  tlbflush: 
+                    enabled: true
+                  ipi: 
+                    enabled: true
+                  evmcs: 
+                    enabled: true
+              clock:
+                timezone: UTC
+                timer:
+                  hpet:
+                    present: false
+                  pit:
+                    tickPolicy: delay
+                  rtc:
+                    tickPolicy: catchup
+                  hyperv: 
+                    present: true
+              devices:
+                bootMenu:
+                  enabled: true
+                autoattachPodInterface: false
+                autoattachSerialConsole: true
+                autoattachGraphicsDevice: true
+                rng: {}
+                disks:
+                  - name: installer-vhdx
+                    disk:
+                      bus: sata
+                    bootOrder: 1
+                  - name: system-disk
+                    disk:
+                      bus: sata
+                    bootOrder: 2
+                  - name: virtio-iso
+                    cdrom:
+                      bus: sata
+                    bootOrder: 3
+                  - name: sysprep
+                    cdrom:
+                      bus: sata
+                    bootOrder: 4
+                inputs:
+                  - type: tablet
+                    bus: usb
+                    name: tablet
+                interfaces:
+                  - name: default
+                    masquerade: {}
+                    model: virtio
+                video:
+                  - name: video0
+                    device:
+                      name: virtio
+            networks:
+              - name: default
+                pod: {}
+            volumes:
+              - name: installer-vhdx
+                persistentVolumeClaim:
+                  claimName: "{{ vm_name }}-installer-pvc"
+              - name: system-disk
+                persistentVolumeClaim:
+                  claimName: "{{ vm_name }}-system-pvc"
+              - name: virtio-iso
+                persistentVolumeClaim:
+                  claimName: "{{ vm_name }}-virtio-iso-pvc"
+              - name: sysprep
+                secret:
+                  secretName: "{{ vm_name }}-sysprep"
+
+- name: Fix cores to be integer type
+  ansible.builtin.set_fact:
+    vm_definition: "{{ vm_definition | combine({'spec': {'template': {'spec': {'domain': {'cpu': {'cores': vm_cpu_cores | int}}}}}}, recursive=True) }}"
+
+- name: Create Windows Server 2025 VirtualMachine
+  kubernetes.core.k8s:
+    definition: "{{ vm_definition }}"
+    state: present
+    wait: false
+  register: vm_creation_result
+
+- name: Create VNC access service
+  tags: [access_services]
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ vm_name }}-vnc"
+        namespace: "{{ kubevirt_namespace }}"
+        labels:
+          app: "{{ vm_name }}"
+      spec:
+        type: NodePort
+        ports:
+        - port: 5900
+          protocol: TCP
+          targetPort: 5900
+          nodePort: 30002
+        - port: 3389
+          protocol: TCP
+          targetPort: 3389
+          nodePort: 30003
+        selector:
+          kubevirt.io/vm: "{{ vm_name }}"
+
+- name: Wait for VM to be created
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachine
+    name: "{{ vm_name }}"
+    namespace: "{{ kubevirt_namespace }}"
+  register: vm_status
+  until: vm_status.resources | length > 0
+  retries: 10
+  delay: 5
+
+- name: Wait for VM to start
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachineInstance
+    name: "{{ vm_name }}"
+    namespace: "{{ kubevirt_namespace }}"
+  register: vmi_status
+  until: vmi_status.resources | length > 0 and (vmi_status.resources[0].status.phase is defined)
+  retries: 30
+  delay: 10
+
+- name: Display installation results
+  ansible.builtin.debug:
+    msg:
+      - "🎉 Windows Server 2025 VM Installation Complete!"
+      - ""
+      - "📊 Status Information:"
+      - "  VM Status: {{ vm_status.resources[0].status.printableStatus | default('Starting') }}"
+      - "  VMI Phase: {{ vmi_status.resources[0].status.phase | default('Pending') }}"
+      - "  Node: {{ vmi_status.resources[0].status.nodeName | default('Not assigned') }}"
+      - "  IP: {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('Not assigned') if vmi_status.resources[0].status.interfaces is defined else 'Not assigned' }}"
+      - ""
+      - "🔐 Access Information:"
+      - "  Administrator Password: {{ windows_admin_password }}"
+      - ""
+      - "🖥️  VNC Access:"
+      - "  Direct: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
+      - "  Proxy: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }} --proxy-only --port 5900"
+      - "  NodePort: localhost:30002 (if NodePort allowed through firewall)"
+      - ""
+      - "🖥️  RDP Access (after Windows setup completes):"
+      - "  Method 1 - Port Forward: kubectl -n {{ kubevirt_namespace }} port-forward service/{{ vm_name }}-vnc 3389:3389"
+      - "  Method 2 - VM IP Direct: RDP to VM_IP:3389"
+      - "  Method 3 - virtctl: virtctl port-forward {{ vm_name }} -n {{ kubevirt_namespace }} 3389:3389"
+      - "  Then connect RDP client to: localhost:3389"
+      - ""
+      - "🛠️  Console Access:"
+      - "  Serial: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
+      - ""
+      - "📁 Storage Configuration:"
+      - "  Installer VHDX: {{ storage_dir }}/{{ vm_name }}-installer/disk.img (boot)"
+      - "  System Disk: {{ storage_dir }}/{{ vm_name }}-system-disk/disk.img (blank {{ system_disk_size }})"
+      - "  VirtIO ISO: {{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
+      - "  Sysprep: Secret {{ vm_name }}-sysprep (Autounattend.xml)"
+      - ""
+      - "🛠 Next Steps:"
+      - "1. Use VNC to monitor Windows installation progress"
+      - "2. Installation proceeds automatically with unattend.xml"
+      - "3. After Windows setup completes, use RDP for remote access"
+      - "4. Login with Administrator/{{ windows_admin_password }}"
