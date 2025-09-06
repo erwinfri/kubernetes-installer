@@ -1,0 +1,12 @@
+# Uninstall HashiCorp Vault Helm release and clean up
+- name: Uninstall Vault Helm release
+  ansible.builtin.shell: helm uninstall vault -n vault
+  ignore_errors: true
+
+- name: Delete vault namespace
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: vault
+    state: absent
+  ignore_errors: true

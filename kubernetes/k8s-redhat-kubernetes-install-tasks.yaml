@@ -203,19 +203,37 @@
   ansible.builtin.command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
   register: calico_apply
   changed_when: "calico_apply.rc == 0"
-
-- name: Configure CoreDNS for external DNS resolution
+  
+- name: Ensure Calico FelixConfiguration allows pod egress (natOutgoing)
   ansible.builtin.shell: |
-    kubectl -n kube-system get configmap coredns -o yaml | \
-      sed 's|forward . /etc/resolv.conf|forward . 8.8.8.8 8.8.4.4|' | \
-      kubectl apply -f -
-  register: coredns_config
-  changed_when: "'configured' in coredns_config.stderr"
+    kubectl patch felixconfiguration default --type='merge' -p '{"spec":{"natOutgoing": true}}'
+  register: calico_nat_out
+  changed_when: "'configured' in calico_nat_out.stdout or calico_nat_out.rc == 0"
+  failed_when: false
 
-- name: Restart CoreDNS to apply DNS configuration
+ - name: Configure CoreDNS for external DNS resolution
+   ansible.builtin.shell: |
+     kubectl -n kube-system get configmap coredns -o yaml | \
+       sed 's|forward . /etc/resolv.conf|forward . 8.8.8.8 8.8.4.4|' | \
+       kubectl apply -f -
+   register: coredns_config
+   changed_when: "'configured' in coredns_config.stderr"
+
   ansible.builtin.command: kubectl -n kube-system rollout restart deployment/coredns
   register: coredns_restart
   changed_when: "coredns_restart.rc == 0"
+
+# Patch kubelet config to set ndots:1 for all pods (cluster-wide DNS fix)
+- name: Patch kubelet config to set ndots:1 for all pods
+  ansible.builtin.shell: |
+    kubectl -n kube-system get configmap kubelet-config -o yaml | \
+      sed '/resolvConf:/!b;n;c\    options:\n      - name: ndots\n        value: "1"' | \
+      kubectl apply -f -
+  register: kubelet_dns_patch
+  changed_when: "kubelet_dns_patch.rc == 0"
+  failed_when: false
+
+  # Note: If your kubelet config is managed by a different configmap (e.g., kubelet-config-1.X), adjust the name accordingly.
 
 - name: Wait for CoreDNS pods to be ready
   ansible.builtin.shell: |

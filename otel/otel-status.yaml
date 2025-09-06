@@ -1,0 +1,54 @@
+---
+# OTel Collector status tasks
+- name: Get OTel Collector pod status
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ otel_namespace }}"
+    label_selectors:
+      - "app=otel-collector"
+  register: otel_pods
+
+- name: Show OTel Collector pod status
+  debug:
+    msg: |
+      OTel Collector pods:
+      {% for pod in otel_pods.resources %}
+        - {{ pod.metadata.name }}: {{ pod.status.phase }}
+      {% else %}
+        No OTel Collector pods found in namespace '{{ otel_namespace }}'.
+      {% endfor %}
+
+- name: Set OTel Collector present fact
+  set_fact:
+    otel_collector_present: "{{ otel_pods.resources | length > 0 }}"
+
+- name: Get recent OTel Collector logs
+  ansible.builtin.shell: |
+    kubectl logs -n {{ otel_namespace }} -l app=otel-collector --tail=20
+  register: otel_logs
+  changed_when: false
+  failed_when: false
+  when: otel_collector_present | bool
+
+- name: Show recent OTel Collector logs
+  debug:
+    msg: |
+      Recent OTel Collector logs:
+      {{ otel_logs.stdout }}
+  when: otel_collector_present | bool
+
+- name: Show OTel Collector usage instructions
+  debug:
+    msg:
+      - "OTel Collector is deployed in namespace '{{ otel_namespace }}'."
+      - "To check pod status: kubectl get pods -n {{ otel_namespace }} -l app=otel-collector"
+      - "To see logs: kubectl logs -n {{ otel_namespace }} -l app=otel-collector --tail=60"
+      - "Metrics are scraped from Vault at http://vault.default.svc.cluster.local:8200/v1/sys/metrics"
+      - "Metrics are exported to: {{ otel_endpoint }}"
+  when: otel_collector_present | bool
+
+- name: Show OTel Collector not present message
+  debug:
+    msg: "OTel Collector is not deployed in namespace '{{ otel_namespace }}'."
+  when: not otel_collector_present | bool

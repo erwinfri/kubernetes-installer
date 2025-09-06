@@ -1,0 +1,101 @@
+- name: Force rollout restart of Vault deployment (ensure new config is used)
+  ansible.builtin.shell: |
+    kubectl -n vault rollout restart deployment vault
+  register: rollout_restart
+  changed_when: false
+  ignore_errors: true
+# vault-hashicorp-otel.yaml (task file)
+# vault-hashicorp-otel.yaml (task file)
+# Adds an OpenTelemetry Collector sidecar to the Vault deployment, sending metrics to a specified endpoint with a token.
+# Usage: ansible-playbook vault-hashicorp-controller.yaml -e action=otel -e otel_token=... -e otel_endpoint=...
+
+
+- name: Set OTel config variable (as YAML, not string)
+  set_fact:
+    otel_config:
+      receivers:
+        prometheus:
+          config:
+            scrape_configs:
+              - job_name: 'vault'
+                metrics_path: /v1/sys/metrics
+                params:
+                  format: [prometheus]
+                static_configs:
+                  - targets: ['localhost:8200']
+                metric_relabel_configs:
+                  - source_labels: [__name__]
+                    regex: 'vault_core_unsealed|vault_core_leader|vault_core_active_handles|vault_request_count_total|vault_request_duration_seconds.*|vault_request_errors_total|vault_storage_puts_total|vault_storage_gets_total|vault_storage_list_total|vault_token_create_total|vault_token_revoke_total|vault_auth_method_request_count_total|vault_audit_log_request_count_total|vault_core_standby|process_cpu_seconds_total|process_resident_memory_bytes'
+                    action: keep
+      exporters:
+        otlphttp:
+          endpoint: "{{ otel_endpoint }}"
+          headers:
+            Authorization: "Bearer {{ otel_token }}"
+          tls:
+            insecure: true
+      service:
+        pipelines:
+          metrics:
+            receivers: [prometheus]
+            exporters: [otlphttp]
+
+- name: Create or update otel-collector ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: otel-collector-config
+        namespace: vault
+      data:
+        otel-collector-config.yaml: |
+          {{ otel_config | to_nice_yaml | indent(10, true) }}
+
+- name: Patch Vault deployment to add otel-collector sidecar
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: vault
+        namespace: vault
+      spec:
+        template:
+          spec:
+            containers:
+              - name: vault-otel-collector
+                image: ubuntu:22.04
+                command: ["sh", "-c", "apt-get update && apt-get install -y curl iputils-ping dnsutils wget ca-certificates && wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.134.0/otelcol-contrib_0.134.0_linux_amd64.tar.gz && tar -xzf otelcol-contrib_0.134.0_linux_amd64.tar.gz && mv otelcol-contrib /usr/local/bin/ && /usr/local/bin/otelcol-contrib --config=/etc/otel-collector-config.yaml"]
+                volumeMounts:
+                  - name: otel-config
+                    mountPath: /etc/otel-collector-config.yaml
+                    subPath: otel-collector-config.yaml
+            dnsConfig:
+              options:
+                - name: ndots
+                  value: "1"
+            volumes:
+              - name: otel-config
+                configMap:
+                  name: otel-collector-config
+
+- name: Show OTel sidecar status
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: vault
+    label_selectors:
+      - app=vault
+  register: vault_pods
+
+- name: Print OTel sidecar container status
+  debug:
+    msg: |
+      OTel sidecar added to Vault deployment.
+      Pod(s) status:
+      {{ vault_pods.resources | map(attribute='status.containerStatuses') | list }}
+      Metrics will be sent to: {{ otel_endpoint }}
+      Using token: {{ otel_token }}

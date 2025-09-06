@@ -1,0 +1,71 @@
+- name: Install Vault CLI locally (Red Hat)
+  ansible.builtin.yum:
+    name:
+      - yum-utils
+    state: present
+  become: true
+
+- name: Add HashiCorp repo for Vault CLI
+  ansible.builtin.command: yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+  args:
+    creates: /etc/yum.repos.d/hashicorp.repo
+  become: true
+
+- name: Install Vault CLI
+  ansible.builtin.yum:
+    name: vault
+    state: present
+  become: true
+
+- name: Apply Vault manifest
+  ansible.builtin.shell: |
+    kubectl apply -f vault-hashicorp/vault-hashicorp-manifest.yaml
+
+- name: Wait for Vault pod to be ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "vault"
+    label_selectors:
+      - "app=vault"
+    wait: true
+    wait_condition:
+      type: Ready
+      status: "True"
+    wait_timeout: 300
+  register: vault_pods
+
+- name: Port-forward Vault service to localhost:8200 (persistent)
+  ansible.builtin.shell: |
+    bash library/start_portforward.sh vault 8200 vault /tmp/vault-portforward.log /tmp/vault-portforward.pid
+    sleep 3
+  ignore_errors: true
+
+- name: Store a secret in Vault (dev root token is 'root')
+  ansible.builtin.shell: |
+    kubectl -n vault exec deploy/vault -- \
+      sh -c 'export VAULT_ADDR=http://127.0.0.1:8200 && vault login root >/dev/null && vault kv put secret/myapp/admin password="SuperSecret123!"'
+  ignore_errors: true
+
+- name: Retrieve the secret from Vault
+  ansible.builtin.shell: |
+    kubectl -n vault exec deploy/vault -- \
+      sh -c 'export VAULT_ADDR=http://127.0.0.1:8200 && vault login root >/dev/null && vault kv get -field=password secret/myapp/admin'
+  register: vault_secret
+  ignore_errors: true
+
+- name: Show the stored password
+  ansible.builtin.debug:
+    msg: "Password for myapp/admin is: {{ vault_secret.stdout | default('N/A') }}"
+
+- name: Show Vault UI info
+  ansible.builtin.debug:
+    msg:
+      - "Vault UI: http://localhost:8200 (token: root)"
+      - "To store a secret: vault kv put secret/myapp/admin password=YOURPASS"
+      - "To get a secret:   vault kv get -field=password secret/myapp/admin"
+      - "---"
+      - "Vault CLI usage (with port-forward running):"
+      - "  export VAULT_ADDR=http://127.0.0.1:8200"
+      - "  vault login root"
+      - "  vault kv get -field=password secret/myapp/admin"

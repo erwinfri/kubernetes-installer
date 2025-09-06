@@ -1,0 +1,22 @@
+# Check status of Vault Helm release and pod
+- name: Check Vault Helm release status
+  ansible.builtin.shell: helm status vault -n vault
+  register: vault_helm_status
+  ignore_errors: true
+
+- name: Show Vault Helm status
+  debug:
+    msg: "{{ vault_helm_status.stdout | default('No release found') }}"
+
+- name: Get Vault pod status
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: vault
+    label_selectors:
+      - "app.kubernetes.io/name=vault"
+  register: vault_pods
+
+- name: Show Vault pod status
+  debug:
+    msg: "{{ vault_pods.resources | map(attribute='status.phase') | list }}"
