@@ -472,6 +472,12 @@
                     <RequiresUserInput>false</RequiresUserInput>
                     <CommandLine>powershell -Command "winrm set winrm/config/service '@{AllowUnencrypted=\"true\"}'; winrm set winrm/config/service/auth '@{Basic=\"true\"}'; winrm set winrm/config/client '@{TrustedHosts=\"*\"}'; Enable-PSRemoting -Force -SkipNetworkProfileCheck; New-NetFirewallRule -DisplayName 'Allow RDP' -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -Profile Domain,Private,Public; New-NetFirewallRule -DisplayName 'Allow WinRM HTTP' -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Domain,Private,Public; New-NetFirewallRule -DisplayName 'Allow WinRM HTTPS' -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow -Profile Domain,Private,Public"</CommandLine>
                   </SynchronousCommand>
+                  <SynchronousCommand wcm:action="add">
+                    <Order>14</Order>
+                    <Description>Setup WinRM HTTPS with self-signed certificate</Description>
+                    <RequiresUserInput>false</RequiresUserInput>
+                    <CommandLine>powershell -Command "$cert = New-SelfSignedCertificate -DnsName 'localhost','127.0.0.1' -CertStoreLocation 'cert:\\LocalMachine\\My'; try { Get-WSManInstance -ResourceURI winrm/config/Listener | Where-Object {$_.Transport -eq 'HTTPS'} | Remove-WSManInstance -Force } catch { Write-Host 'No existing HTTPS listeners' }; New-WSManInstance -ResourceURI winrm/config/Listener -SelectorSet @{Address='*';Transport='HTTPS'} -ValueSet @{Hostname='localhost';CertificateThumbprint=$cert.Thumbprint}; Restart-Service WinRM"</CommandLine>
+                  </SynchronousCommand>
                 </FirstLogonCommands>
               </component>
             </settings>
@@ -832,6 +838,28 @@
               - name: winrm
                 port: 5985
                 targetPort: 5985
+                protocol: TCP
+
+    - name: Create WinRM HTTPS access service
+      tags: [access_services]
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: win2025server-winrm-https
+            namespace: "{{ kubevirt_namespace }}"
+            labels:
+              app: win2025server
+          spec:
+            type: ClusterIP
+            selector:
+              kubevirt.io/vm: "{{ vm_name }}"
+            ports:
+              - name: winrm-https
+                port: 5986
+                targetPort: 5986
                 protocol: TCP
 
     - name: Create RDP access service

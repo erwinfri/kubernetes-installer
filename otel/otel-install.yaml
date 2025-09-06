@@ -1,0 +1,103 @@
+---
+# OTel Collector install tasks
+    - name: Set OTel Collector config for Vault metrics
+      set_fact:
+        otel_config:
+          receivers:
+            prometheus:
+              config:
+                scrape_configs:
+                  - job_name: 'vault'
+                    metrics_path: /v1/sys/metrics
+                    params:
+                      format: [prometheus]
+                    static_configs:
+                      - targets: ['vault.default.svc.cluster.local:8200']
+                    metric_relabel_configs:
+                      - source_labels: [__name__]
+                        regex: 'vault_core_unsealed|vault_core_leader|vault_core_active_handles|vault_request_count_total|vault_request_duration_seconds.*|vault_request_errors_total|vault_storage_puts_total|vault_storage_gets_total|vault_storage_list_total|vault_token_create_total|vault_token_revoke_total|vault_auth_method_request_count_total|vault_audit_log_request_count_total|vault_core_standby|process_cpu_seconds_total|process_resident_memory_bytes'
+                        action: keep
+          exporters:
+            otlphttp:
+              endpoint: "{{ otel_endpoint }}"
+              headers:
+                Authorization: "Bearer {{ otel_token }}"
+              tls:
+                insecure: true
+          service:
+            pipelines:
+              metrics:
+                receivers: [prometheus]
+                exporters: [otlphttp]
+
+    - name: Create or update OTel Collector ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: otel-collector-config
+            namespace: "{{ otel_namespace }}"
+          data:
+            otel-collector-config.yaml: |
+              {{ otel_config | to_nice_yaml | indent(14, true) }}
+
+    - name: Deploy OTel Collector Service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: vault-metrics
+            namespace: "{{ otel_namespace }}"
+          spec:
+            selector:
+              app: otel-collector
+            ports:
+              - name: http-metrics
+                port: 8200
+                targetPort: 8200
+
+    - name: Deploy OTel Collector Deployment
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: otel-collector
+            namespace: "{{ otel_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: otel-collector
+            template:
+              metadata:
+                labels:
+                  app: otel-collector
+              spec:
+                dnsConfig:
+                  options:
+                    - name: ndots
+                      value: "1"
+                containers:
+                  - name: otel-collector
+                    image: otel/opentelemetry-collector-contrib:0.133.0
+                    args:
+                      - "--config=/etc/otel-collector-config.yaml"
+                    env:
+                      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                        value: "{{ otel_endpoint }}"
+                      - name: OTEL_EXPORTER_OTLP_TOKEN
+                        value: "{{ otel_token }}"
+                    volumeMounts:
+                      - name: otel-config
+                        mountPath: /etc/otel-collector-config.yaml
+                        subPath: otel-collector-config.yaml
+                volumes:
+                  - name: otel-config
+                    configMap:
+                      name: otel-collector-config

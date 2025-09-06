@@ -1,0 +1,31 @@
+---
+# OTel Collector uninstall tasks
+- name: Delete OTel Collector Deployment
+  kubernetes.core.k8s:
+    state: absent
+    api_version: apps/v1
+    kind: Deployment
+    name: otel-collector
+    namespace: "{{ otel_namespace }}"
+
+- name: Delete OTel Collector Service
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Service
+    name: vault-metrics
+    namespace: "{{ otel_namespace }}"
+
+- name: Delete OTel Collector ConfigMap
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: ConfigMap
+    name: otel-collector-config
+    namespace: "{{ otel_namespace }}"
+
+- name: Show OTel Collector uninstall info
+  debug:
+    msg:
+      - "OTel Collector resources have been deleted from namespace '{{ otel_namespace }}'."
+      - "Check with: kubectl get all -n {{ otel_namespace }} | grep otel-collector || true"
