@@ -1,13 +1,16 @@
 
 
-# Install Python requirements for Vault modules (must be first)
-- name: Install Python requirements
-  ansible.builtin.pip:
-    requirements: "{{ playbook_dir }}/windows-server/requirements.txt"
-    executable: pip3
-    extra_args: --ignore-installed
-  become: true
-  tags: always
+# Play 1: Install Python requirements for Vault modules (must be first)
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Install Python requirements
+      ansible.builtin.pip:
+        requirements: "{{ playbook_dir }}/windows-server/requirements.txt"
+        executable: pip3
+        extra_args: --ignore-installed
+      become: true
+      tags: always
 
 # Ensure port-forward script exists and is executable (must be before Vault usage)
 - name: Ensure port-forward script exists and is executable
