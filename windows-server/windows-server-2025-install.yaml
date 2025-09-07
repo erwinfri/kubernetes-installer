@@ -130,9 +130,15 @@
       register: portforward_script_stat
 
     # ...existing code...
-        fail_msg: |
+    - name: Fail if Vault environment variables are not set
+      ansible.builtin.fail:
+        msg: |
           HashiCorp Vault address/token not set. Please check vault_addr and win2025_admin_token variables.
-        success_msg: HashiCorp Vault environment variables are set.
+      when: vault_addr is not defined or win2025_admin_token is not defined
+    - name: Success if Vault environment variables are set
+      ansible.builtin.debug:
+        msg: HashiCorp Vault environment variables are set.
+      when: vault_addr is defined and win2025_admin_token is defined
 
     - name: Store admin password in Vault
       community.hashi_vault.vault_write:
