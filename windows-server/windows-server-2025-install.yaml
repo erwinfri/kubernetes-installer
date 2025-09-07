@@ -1,16 +1,59 @@
 
 
-# Play 1: Install Python requirements for Vault modules (must be first)
-- hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Install Python requirements
-      ansible.builtin.pip:
-        requirements: "{{ playbook_dir }}/windows-server/requirements.txt"
-        executable: pip3
-        extra_args: --ignore-installed
-      become: true
-      tags: always
+
+
+# Install Python requirements for Vault modules (must be first)
+- name: Install Python requirements
+  ansible.builtin.pip:
+    requirements: "{{ playbook_dir }}/windows-server/requirements.txt"
+    executable: pip3
+    extra_args: --ignore-installed
+  become: true
+  tags: always
+
+
+# Ensure port-forward script exists and is executable (must be before Vault usage)
+- name: Ensure port-forward script exists and is executable
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/library/start_portforward.sh"
+  register: portforward_script_stat
+
+- name: Fail if port-forward script is missing or not executable
+  ansible.builtin.fail:
+    msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
+  when: not portforward_script_stat.stat.exists or not portforward_script_stat.stat.mode|int is search('7')
+
+- name: Port-forward Vault service for local access
+  ansible.builtin.shell: |
+    ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
+    sleep 5
+  async: 10
+  poll: 0
+  register: port_forward_job
+
+- name: Show Vault port-forward log for troubleshooting
+  ansible.builtin.shell: cat /tmp/vault-portforward.log || true
+  register: vault_portforward_log
+  changed_when: false
+  ignore_errors: true
+  tags: always
+
+- name: Display Vault port-forward log output
+  ansible.builtin.debug:
+    var: vault_portforward_log.stdout
+  tags: always
+
+- name: Wait for Vault API to be reachable on localhost:8200
+  ansible.builtin.wait_for:
+    host: localhost
+    port: 8200
+    delay: 2
+    timeout: 30
+    state: started
+  tags: always
+
+# ...existing code continues as a flat list of tasks...
+
 
 # Ensure port-forward script exists and is executable (must be before Vault usage)
 - name: Ensure port-forward script exists and is executable
@@ -114,49 +157,12 @@
   ansible.builtin.set_fact:
     win2025_vault_env:
       VAULT_ADDR: "http://localhost:8200"
+
       VAULT_TOKEN: "{{ win2025_admin_token.stdout }}"
     win2025_admin_token: "{{ win2025_admin_token.stdout }}"
   tags: always
 
-- hosts: localhost
-  gather_facts: false
-  vars:
-    # You can define default variables here if needed
-  tasks:
-    # Install Python requirements for Vault modules (must be first)
-  # ...removed Install Python requirements task...
-
-    # Ensure port-forward script exists and is executable (must be before Vault usage)
-    - name: Ensure port-forward script exists and is executable
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/library/start_portforward.sh"
-      register: portforward_script_stat
-
-    # ...existing code...
-    - name: Fail if Vault environment variables are not set
-      ansible.builtin.fail:
-        msg: |
-          HashiCorp Vault address/token not set. Please check vault_addr and win2025_admin_token variables.
-      when: vault_addr is not defined or win2025_admin_token is not defined
-    - name: Success if Vault environment variables are set
-      ansible.builtin.debug:
-        msg: HashiCorp Vault environment variables are set.
-      when: vault_addr is defined and win2025_admin_token is defined
-
-    - name: Store admin password in Vault
-      community.hashi_vault.vault_write:
-        url: "{{ vault_addr }}"
-        token: "{{ win2025_admin_token }}"
-        path: "secret/data/windows-server-2025/admin"
-        data:
-          password: "{{ windows_admin_password }}"
-      register: vault_store_result
-
-    - name: Display Vault storage result
-      ansible.builtin.debug:
-        msg:
-          - "🔐 Windows admin password stored in Vault at: secret/data/windows-server-2025/admin"
-          - "  (field: password)"
+  # ...existing code continues as a flat list of tasks...
 
 - name: Pre-flight checks
   block:
