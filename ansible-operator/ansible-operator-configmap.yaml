@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ansible-operator-config
+  namespace: default
+data:
+  watches.yaml: |
+    - version: v1
+      group: infra.example.com
+      kind: WindowsVM
+      playbook: /opt/ansible/project/windows-server/windows-server-2025-install.yaml
+
+  windows-server-2025-install.yaml: |
+    - hosts: localhost
+      gather_facts: false
+      tasks:
+        # Install Python requirements for Vault modules (must be first)
+        - name: Install Python requirements
+          ansible.builtin.pip:
+            requirements: "{{ playbook_dir }}/windows-server/requirements.txt"
+            executable: pip3
+            extra_args: --ignore-installed
+          become: true
+          tags: always
+
+        # Ensure port-forward script exists and is executable (must be before Vault usage)
+        - name: Ensure port-forward script exists and is executable
+          ansible.builtin.stat:
+            path: "{{ playbook_dir }}/library/start_portforward.sh"
+          register: portforward_script_stat
+
+        - name: Fail if port-forward script is missing or not executable
+          ansible.builtin.fail:
+            msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
+          when: not portforward_script_stat.stat.exists or not portforward_script_stat.stat.mode|int is search('7')
+
+        - name: Port-forward Vault service for local access
+          ansible.builtin.shell: |
+            ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
+            sleep 5
+          async: 10
+          poll: 0
+          register: port_forward_job
+
+        - name: Show Vault port-forward log for troubleshooting
+          ansible.builtin.shell: cat /tmp/vault-portforward.log || true
+          register: vault_portforward_log
+          changed_when: false
+          ignore_errors: true
+          tags: always
+
+        - name: Display Vault port-forward log output
+          ansible.builtin.debug:
+            var: vault_portforward_log.stdout
+          tags: always
+
+        - name: Wait for Vault API to be reachable on localhost:8200
+          ansible.builtin.wait_for:
+            host: localhost
+            port: 8200
+            delay: 2
+            timeout: 30
+            state: started
+          tags: always
+
+        # Set Vault environment variables for all Vault operations and CLI login (must come before any use)
+        - name: Set Vault environment variables for Ansible and CLI
+          ansible.builtin.set_fact:
+            vault_env:
+              VAULT_ADDR: "http://localhost:8200"
+              VAULT_TOKEN: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
+            vault_addr: "http://localhost:8200"
+            vault_token: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
+          tags: always
+
+        # Ensure KV secrets engine is enabled at 'secret/'
+        - name: Ensure KV secrets engine is enabled at 'secret/'
+          ansible.builtin.shell: |
+            vault secrets enable -path=secret kv || vault secrets tune -max-lease-ttl=87600h secret/
+          environment: "{{ vault_env }}"
+          register: vault_kv_enable
+          changed_when: "'successfully enabled' in vault_kv_enable.stdout or 'Success! Tuned the mount' in vault_kv_enable.stdout"
+          failed_when: false
+          tags: always
+
+        # Create Vault policy file for Windows Server 2025 admin secret (must come before any use)
+        - name: Write Vault policy file for win2025-admin-policy
+          ansible.builtin.copy:
+            dest: /tmp/win2025-admin-policy.hcl
+            content: |
+              path "secret/data/windows-server-2025/admin" {
+                capabilities = ["create", "update", "read", "delete", "list"]
+              }
+          tags: always
+
+        # Apply the Vault policy for Windows Server 2025 admin secret
+        - name: Write win2025-admin-policy to Vault
+          ansible.builtin.shell: |
+            vault policy write win2025-admin-policy /tmp/win2025-admin-policy.hcl
+          environment: "{{ vault_env }}"
+          register: vault_policy_write_result
+          changed_when: vault_policy_write_result.rc == 0
+          failed_when: vault_policy_write_result.rc != 0
+          tags: always
+
+        # Create a Vault token with the win2025-admin-policy
+        - name: Create Vault token with win2025-admin-policy
+          ansible.builtin.shell: |
+            vault token create -policy=win2025-admin-policy -format=json > /tmp/win2025-admin-token.json
+          environment: "{{ vault_env }}"
+          register: vault_token_create_result
+          changed_when: vault_token_create_result.rc == 0
+          failed_when: vault_token_create_result.rc != 0
+          tags: always
+
+        # Read the created token value
+        - name: Read created Vault token value
+          ansible.builtin.shell: jq -r .auth.client_token /tmp/win2025-admin-token.json
+          register: win2025_admin_token
+          changed_when: false
+          tags: always
+
+        # Set Vault environment for admin token
+        - name: Set Vault environment for admin token
+          ansible.builtin.set_fact:
+            win2025_vault_env:
+              VAULT_ADDR: "http://localhost:8200"
+              VAULT_TOKEN: "{{ win2025_admin_token.stdout }}"
+            win2025_admin_token: "{{ win2025_admin_token.stdout }}"
+          tags: always
+        # ---
+
+        # ...existing code...
