@@ -6,3 +6,12 @@
 __pycache__
 *.pyc
 archive/
+*.tar.gz
+*.zip
+*.bak
+*.tmp
+*.swp
+*.swo
+*.env
+*.local
+.DS_Store
