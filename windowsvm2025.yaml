@@ -1,0 +1,20 @@
+apiVersion: infra.example.com/v1
+kind: WindowsVM
+metadata:
+  name: windowsvm2025
+spec:
+  vmName: win2025-demo                # VM name (default: win2025-demo)
+  image: win2025server.vhdx            # VHDX image file (default: win2025server.vhdx)
+  vm_cpu_cores: 4                      # Number of CPU cores (default: 4)
+  vm_memory: 8Gi                       # VM memory (default: 8Gi)
+  windows_admin_password: "Titkos123%" # Windows admin password (required)
+  vhdx_path: /kubevirt/images/win2025server.vhdx # Path to VHDX (default: ./win2025server.vhdx)
+  storage_dir: /kubevirt/images        # Storage directory (default: /kubevirt/images)
+  kubevirt_namespace: default          # KubeVirt namespace (default: default)
+  vhdx_download_url: "https://go.microsoft.com/fwlink/?linkid=2293215&clcid=0x409&culture=en-us&country=us" # Optional: VHDX download URL
+  virtio_iso_url: "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso" # Optional: VirtIO ISO URL
+  windows_product_key: ""              # Optional: Windows product key
+  system_disk_size: "64Gi"            # Optional: System disk size
+  installer_disk_size: "15Gi"         # Optional: Installer disk size
+  virtio_iso_size: "1Gi"              # Optional: VirtIO ISO size
+  # Add more fields as needed for your playbook or environment

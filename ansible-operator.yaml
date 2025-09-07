@@ -1,0 +1,39 @@
+# Minimal Ansible Operator install manifest (for local or dev use)
+# This will install the Ansible Operator using the official container image
+# and mount your watches.yaml and playbooks for development/testing.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ansible-operator
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ansible-operator
+  template:
+    metadata:
+      labels:
+        app: ansible-operator
+    spec:
+      containers:
+      - name: operator
+        image: quay.io/operator-framework/ansible-operator:v1.34.1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WATCH_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config
+          mountPath: /opt/ansible/watches.yaml
+          subPath: watches.yaml
+        - name: config
+          mountPath: /opt/ansible/project/windows-server/windows-server-2025-install.yaml
+          subPath: windows-server-2025-install.yaml
+      volumes:
+      - name: config
+        configMap:
+          name: ansible-operator-config

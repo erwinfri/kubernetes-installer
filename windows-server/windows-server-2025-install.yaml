@@ -79,14 +79,6 @@
       }
   tags: always
 
-# Set Vault environment variables for all Vault operations and CLI login (must come before any use)
-- name: Set Vault environment variables for Ansible and CLI
-  ansible.builtin.set_fact:
-    vault_env:
-      VAULT_ADDR: "http://localhost:8200"
-      VAULT_TOKEN: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
-  tags: always
-
 # Apply the Vault policy for Windows Server 2025 admin secret
 - name: Write win2025-admin-policy to Vault
   ansible.builtin.shell: |
@@ -122,23 +114,22 @@
       VAULT_TOKEN: "{{ win2025_admin_token.stdout }}"
     win2025_admin_token: "{{ win2025_admin_token.stdout }}"
   tags: always
-# ---
 
+- hosts: localhost
+  gather_facts: false
+  vars:
+    # You can define default variables here if needed
+  tasks:
+    # Install Python requirements for Vault modules (must be first)
+  # ...removed Install Python requirements task...
 
-# Windows Server 2025 Installation Tasks (moved from top-level)
-# Controller remains top-level.
+    # Ensure port-forward script exists and is executable (must be before Vault usage)
+    - name: Ensure port-forward script exists and is executable
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/library/start_portforward.sh"
+      register: portforward_script_stat
 
-# Windows Server 2025 Installation Module
-# This module handles the complete installation of Windows Server 2025 VM
-
-- name: Store Windows admin password in Vault (pre-install)
-  when: windows_admin_password is defined
-  block:
-    - name: Ensure Vault address and token are set
-      ansible.builtin.assert:
-        that:
-          - vault_addr != ''
-          - win2025_admin_token != ''
+    # ...existing code...
         fail_msg: |
           HashiCorp Vault address/token not set. Please check vault_addr and win2025_admin_token variables.
         success_msg: HashiCorp Vault environment variables are set.
