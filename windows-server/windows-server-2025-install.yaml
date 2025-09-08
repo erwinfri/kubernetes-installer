@@ -1,6 +1,8 @@
 
-
-
+- name: Set vm_name from vmName if provided, else default to win2025server
+  ansible.builtin.set_fact:
+    vm_name: "{{ vmName | default('win2025server') }}"
+  tags: always
 
 # Install Python requirements for Vault modules (must be first)
 - name: Install Python requirements
@@ -11,7 +13,6 @@
   become: true
   tags: always
 
-
 # Ensure port-forward script exists and is executable (must be before Vault usage)
 - name: Ensure port-forward script exists and is executable
   ansible.builtin.stat:
@@ -52,57 +53,29 @@
     state: started
   tags: always
 
-# ...existing code continues as a flat list of tasks...
 
-
-# Ensure port-forward script exists and is executable (must be before Vault usage)
-- name: Ensure port-forward script exists and is executable
-  ansible.builtin.stat:
-    path: "{{ playbook_dir }}/library/start_portforward.sh"
-  register: portforward_script_stat
-
-- name: Fail if port-forward script is missing or not executable
-  ansible.builtin.fail:
-    msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
-  when: not portforward_script_stat.stat.exists or not portforward_script_stat.stat.mode|int is search('7')
-
-- name: Port-forward Vault service for local access
-  ansible.builtin.shell: |
-    ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
-    sleep 5
-  async: 10
-  poll: 0
-  register: port_forward_job
-
-- name: Show Vault port-forward log for troubleshooting
-  ansible.builtin.shell: cat /tmp/vault-portforward.log || true
-  register: vault_portforward_log
-  changed_when: false
-  ignore_errors: true
-  tags: always
-
-- name: Display Vault port-forward log output
-  ansible.builtin.debug:
-    var: vault_portforward_log.stdout
-  tags: always
-
-- name: Wait for Vault API to be reachable on localhost:8200
-  ansible.builtin.wait_for:
-    host: localhost
-    port: 8200
-    delay: 2
-    timeout: 30
-    state: started
-  tags: always
-
-# Set Vault environment variables for all Vault operations and CLI login (must come before any use)
+# Set Vault environment variables for CLI (token from /root/.vault-token)
 - name: Set Vault environment variables for Ansible and CLI
   ansible.builtin.set_fact:
     vault_env:
       VAULT_ADDR: "http://localhost:8200"
-      VAULT_TOKEN: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
-    vault_addr: "http://localhost:8200"
-    vault_token: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
+      VAULT_TOKEN: "{{ lookup('file', '/root/.vault-token') | trim }}"
+  tags: always
+
+# Authenticate to Vault CLI using token from /root/.vault-token
+- name: Vault CLI login with token from /root/.vault-token
+  ansible.builtin.shell: |
+    export VAULT_ADDR="http://localhost:8200"
+    vault login $(cat /root/.vault-token)
+  environment: "{{ vault_env }}"
+  register: vault_cli_login
+  changed_when: false
+  failed_when: vault_cli_login.rc != 0 or 'Success! You are now authenticated' not in vault_cli_login.stdout
+  tags: always
+
+- name: Show Vault CLI login output
+  ansible.builtin.debug:
+    var: vault_cli_login.stdout
   tags: always
 
 # Ensure KV secrets engine is enabled at 'secret/'
@@ -271,13 +244,13 @@
         state: directory
         mode: '0755'
       loop:
-        - "{{ storage_dir }}/win2025server-system-disk"
-        - "{{ storage_dir }}/win2025server-installer"
-        - "{{ storage_dir }}/win2025server-virtio-iso"
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk"
+        - "{{ storage_dir }}/{{ vm_name }}-installer"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
 
     - name: Convert Windows 2025 VHDX to system disk (RAW, direct boot)
       ansible.builtin.shell: |
-        DST={{ storage_dir }}/win2025server-system-disk/disk.img
+        DST={{ storage_dir }}/{{ vm_name }}-system-disk/disk.img
         SRC={{ vhdx_path | default('./win2025server.vhdx') }}
         ensure_raw() {
           # Return 0 if file is raw format; 1 otherwise
@@ -298,7 +271,7 @@
 
     - name: Detect partition table on converted system disk (GPT vs MBR)
       ansible.builtin.shell: |
-        DST={{ storage_dir }}/win2025server-system-disk/disk.img
+        DST={{ storage_dir }}/{{ vm_name }}-system-disk/disk.img
         if [ -f "$DST" ]; then
           part="$(parted -s "$DST" print 2>/dev/null | awk -F': ' '/Partition Table/ {print tolower($2)}')"
           if [ -z "$part" ]; then echo unknown; else echo "$part"; fi
@@ -668,7 +641,7 @@
 
     - name: Check if VirtIO ISO already exists in storage directory
       ansible.builtin.stat:
-        path: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+        path: "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
       register: virtio_iso_storage_exists
 
     - name: Download VirtIO driver ISO to playbook directory if not exists locally (with progress)
@@ -685,7 +658,7 @@
     - name: Copy VirtIO ISO from playbook directory to storage directory (always overwrite)
       ansible.builtin.copy:
         src: "./virtio-win.iso"
-        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+        dest: "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
         mode: '0644'
         force: yes
       when:
@@ -708,7 +681,7 @@
     - name: Copy VirtIO driver ISO from custom path (always overwrite)
       ansible.builtin.copy:
         src: "{{ virtio_iso_path }}"
-        dest: "{{ storage_dir }}/win2025server-virtio-iso/disk.img"
+        dest: "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
         mode: '0644'
         force: yes
       when:
@@ -727,7 +700,7 @@
           apiVersion: v1
           kind: Secret
           metadata:
-            name: win2025server-sysprep
+            name: "{{ vm_name }}-sysprep"
             namespace: "{{ kubevirt_namespace }}"
           type: Opaque
           data:
@@ -751,7 +724,7 @@
         msg:
           - "📋 Unattend.xml Configuration:"
           - "  - Administrator Password: {{ windows_admin_password }}"
-          - "  - Sysprep Secret: win2025server-sysprep (Autounattend.xml)"
+          - "  - Sysprep Secret: {{ vm_name }}-sysprep (Autounattend.xml)"
 
 - name: Create Kubernetes storage resources
   block:
@@ -772,6 +745,22 @@
       register: node_hostname
       changed_when: false
 
+    - name: Set PV resources for loop
+      ansible.builtin.set_fact:
+        pv_resources:
+          - name: "{{ vm_name }}-installer-pv"
+            size: "{{ installer_disk_size | default('15Gi') }}"
+            access_modes: ["ReadWriteOnce"]
+            path: "{{ vm_name }}-installer"
+          - name: "{{ vm_name }}-system-pv"
+            size: "{{ system_disk_size | default('64Gi') }}"
+            access_modes: ["ReadWriteOnce"]
+            path: "{{ vm_name }}-system-disk"
+          - name: "{{ vm_name }}-virtio-iso-pv"
+            size: "{{ virtio_iso_size | default('1Gi') }}"
+            access_modes: ["ReadOnlyMany"]
+            path: "{{ vm_name }}-virtio-iso"
+
     - name: Create PersistentVolumes
       kubernetes.core.k8s:
         state: present
@@ -782,7 +771,7 @@
             name: "{{ item.name }}"
             labels:
               type: local
-              app: win2025server
+              app: "{{ vm_name }}"
           spec:
             capacity:
               storage: "{{ item.size }}"
@@ -800,10 +789,20 @@
                   - key: kubernetes.io/hostname
                     operator: In
                     values: ["{{ node_hostname.stdout }}"]
-      loop:
-        - { name: "win2025server-installer-pv", size: "15Gi", access_modes: ["ReadWriteOnce"], path: "win2025server-installer" }
-        - { name: "win2025server-system-pv", size: "64Gi", access_modes: ["ReadWriteOnce"], path: "win2025server-system-disk" }
-        - { name: "win2025server-virtio-iso-pv", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"], path: "win2025server-virtio-iso" }
+      loop: "{{ pv_resources }}"
+
+    - name: Set PVC resources for loop
+      ansible.builtin.set_fact:
+        pvc_resources:
+          - name: "{{ vm_name }}-installer-pvc"
+            size: "{{ installer_disk_size | default('15Gi') }}"
+            access_modes: ["ReadWriteOnce"]
+          - name: "{{ vm_name }}-system-pvc"
+            size: "{{ system_disk_size | default('64Gi') }}"
+            access_modes: ["ReadWriteOnce"]
+          - name: "{{ vm_name }}-virtio-iso-pvc"
+            size: "{{ virtio_iso_size | default('1Gi') }}"
+            access_modes: ["ReadOnlyMany"]
 
     - name: Create PersistentVolumeClaims
       kubernetes.core.k8s:
@@ -821,10 +820,7 @@
                 storage: "{{ item.size }}"
             storageClassName: local-storage
             volumeMode: Filesystem
-      loop:
-        - { name: "win2025server-installer-pvc", size: "15Gi", access_modes: ["ReadWriteOnce"] }
-        - { name: "win2025server-system-pvc", size: "64Gi", access_modes: ["ReadWriteOnce"] }
-        - { name: "win2025server-virtio-iso-pvc", size: "{{ virtio_iso_size | default('1Gi') }}", access_modes: ["ReadOnlyMany"] }
+      loop: "{{ pvc_resources }}"
 
 - name: Deploy Windows Server VM
   block:
@@ -837,7 +833,7 @@
             name: "{{ vm_name }}"
             namespace: "{{ kubevirt_namespace }}"
             labels:
-              app: win2025server
+              app: "{{ vm_name }}"
               os: windows
               version: "2025"
           spec:
@@ -941,7 +937,7 @@
                   - name: sysprep
                     sysprep:
                       secret:
-                        name: win2025server-sysprep
+                        name: "{{ vm_name }}-sysprep"
 
     - name: Fix cores to be integer type (no change, kept for compatibility)
       ansible.builtin.set_fact:
@@ -962,10 +958,10 @@
           apiVersion: v1
           kind: Service
           metadata:
-            name: win2025server-vnc
+            name: "{{ vm_name }}-vnc"
             namespace: "{{ kubevirt_namespace }}"
             labels:
-              app: win2025server
+              app: "{{ vm_name }}"
           spec:
             type: NodePort
             selector:
@@ -975,7 +971,6 @@
                 port: 5900
                 targetPort: 5900
                 protocol: TCP
-                nodePort: 30001
 
     - name: Create WinRM access service
       tags: [access_services]
@@ -985,10 +980,10 @@
           apiVersion: v1
           kind: Service
           metadata:
-            name: win2025server-winrm
+            name: "{{ vm_name }}-winrm"
             namespace: "{{ kubevirt_namespace }}"
             labels:
-              app: win2025server
+              app: "{{ vm_name }}"
           spec:
             type: ClusterIP
             selector:
@@ -1007,10 +1002,10 @@
           apiVersion: v1
           kind: Service
           metadata:
-            name: win2025server-winrm-https
+            name: "{{ vm_name }}-winrm-https"
             namespace: "{{ kubevirt_namespace }}"
             labels:
-              app: win2025server
+              app: "{{ vm_name }}"
           spec:
             type: ClusterIP
             selector:
@@ -1029,10 +1024,10 @@
           apiVersion: v1
           kind: Service
           metadata:
-            name: win2025server-rdp
+            name: "{{ vm_name }}-rdp"
             namespace: "{{ kubevirt_namespace }}"
             labels:
-              app: win2025server
+              app: "{{ vm_name }}"
           spec:
             type: NodePort
             selector:
@@ -1042,7 +1037,6 @@
                 port: 3389
                 targetPort: 3389
                 protocol: TCP
-                nodePort: 30002
  
     - name: Verify installation
       block:

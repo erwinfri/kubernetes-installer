@@ -81,6 +81,7 @@
       status: "True"
     wait_timeout: 300
 
+
 - name: Port-forward Vault service for initialization
   ansible.builtin.shell: |
     ./library/start_portforward.sh vault 8200 {{ vault_namespace }} /tmp/vault-portforward.log /tmp/vault-portforward.pid
@@ -91,11 +92,11 @@
 
 - name: Initialize Vault
   ansible.builtin.shell: |
+    rm -f /root/vault-init.json
     export VAULT_ADDR=http://localhost:8200
-    vault operator init -key-shares=1 -key-threshold=1 -format=json > /tmp/vault-init.json
+    vault operator init -key-shares=1 -key-threshold=1 -format=json > /root/vault-init.json
   environment:
     VAULT_ADDR: http://localhost:8200
-
   register: vault_init
   until: vault_init.rc == 0
   retries: 10
@@ -104,7 +105,7 @@
 - name: Unseal Vault
   ansible.builtin.shell: |
     export VAULT_ADDR=http://localhost:8200
-    vault operator unseal $(jq -r '.unseal_keys_b64[0]' /tmp/vault-init.json)
+    vault operator unseal $(jq -r '.unseal_keys_b64[0]' /root/vault-init.json)
   environment:
     VAULT_ADDR: http://localhost:8200
   register: vault_unseal
@@ -125,13 +126,13 @@
       status: "True"
     wait_timeout: 120
 
-- name: Move and secure root token file
+- name: Create /root/.vault-token from root token
   ansible.builtin.shell: |
-    mv /tmp/vault-init.json /root/vault-init.json
-    chmod 600 /root/vault-init.json
-  args:
-    creates: /root/vault-init.json
+    jq -r '.root_token' /root/vault-init.json > /root/.vault-token
+    chmod 600 /root/.vault-token
   become: true
+
+# (No longer needed: vault-init.json is created directly in /root)
 
 - name: Show Vault usage instructions
   debug:

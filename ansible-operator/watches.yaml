@@ -1,4 +1,0 @@
-- version: v1
-  group: infra.example.com
-  kind: WindowsVM
-  playbook: ../windows-server/windows-server-2025-install.yaml
