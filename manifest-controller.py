@@ -12,6 +12,7 @@ import yaml
 import subprocess
 import signal
 import urwid
+import glob
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -25,16 +26,8 @@ def load_kube_config():
         config.load_kube_config()
 
 def ensure_crd_exists(api_ext):
-    try:
-        api_ext.read_custom_resource_definition(CRD_NAME)
-        print(f"\033[92m✓ CRD {CRD_NAME} already exists.\033[0m")
-    except ApiException as e:
-        if e.status == 404:
-            print(f"\033[93mCRD {CRD_NAME} not found. Creating...\033[0m")
-            api_ext.create_custom_resource_definition(CRD_TEMPLATE)
-            print(f"\033[92m✓ CRD {CRD_NAME} created.\033[0m")
-        else:
-            raise
+    """Ensure CRD exists, preferring file-based deployment"""
+    return deploy_crd_from_file(api_ext, MANIFEST_CONTROLLER_DIR)
 
 # --- CRD Template ---
 CRD_TEMPLATE = {
@@ -87,6 +80,7 @@ CRD_TEMPLATE = {
     }
 }
 PLAYBOOK_PATH = "/root/kubernetes-installer/windows-server-controller.yaml"
+MANIFEST_CONTROLLER_DIR = "/root/kubernetes-installer/manifest-controller"
 
 # --- Utility Functions ---
 def load_kube_config():
@@ -95,17 +89,104 @@ def load_kube_config():
     except config.ConfigException:
         config.load_kube_config()
 
-def ensure_crd_exists(api_ext):
+def load_cr_files_from_directory(directory_path):
+    """Load Custom Resource YAML files from a directory"""
+    cr_files = []
+    if not os.path.exists(directory_path):
+        print(f"\033[93mDirectory {directory_path} does not exist\033[0m")
+        return cr_files
+    
+    # Look for CR files (not CRD files)
+    yaml_files = glob.glob(os.path.join(directory_path, "*-cr.yaml"))
+    for file_path in yaml_files:
+        try:
+            with open(file_path, 'r') as f:
+                cr_data = yaml.safe_load(f)
+                if cr_data and cr_data.get('kind') == 'WindowsVM':
+                    cr_files.append({
+                        'data': cr_data,
+                        'file_path': file_path,
+                        'source': 'file'
+                    })
+                    print(f"\033[92m✓ Loaded CR from {file_path}\033[0m")
+        except Exception as e:
+            print(f"\033[91mError loading CR from {file_path}: {e}\033[0m")
+    
+    return cr_files
+
+def deploy_crd_from_file(api_ext, directory_path):
+    """Deploy CRD from file if it doesn't exist"""
+    crd_file_path = os.path.join(directory_path, "win2025-vm-crd.yaml")
+    
     try:
+        # Check if CRD already exists
         api_ext.read_custom_resource_definition(CRD_NAME)
         print(f"\033[92m✓ CRD {CRD_NAME} already exists.\033[0m")
+        return True
     except ApiException as e:
         if e.status == 404:
-            print(f"\033[93mCRD {CRD_NAME} not found. Creating...\033[0m")
-            api_ext.create_custom_resource_definition(CRD_TEMPLATE)
-            print(f"\033[92m✓ CRD {CRD_NAME} created.\033[0m")
+            print(f"\033[93mCRD {CRD_NAME} not found. Attempting to create from file...\033[0m")
+            
+            # Try to load CRD from file
+            if os.path.exists(crd_file_path):
+                try:
+                    with open(crd_file_path, 'r') as f:
+                        crd_data = yaml.safe_load(f)
+                        api_ext.create_custom_resource_definition(body=crd_data)
+                        print(f"\033[92m✓ CRD {CRD_NAME} created from file {crd_file_path}.\033[0m")
+                        return True
+                except Exception as file_error:
+                    print(f"\033[91mError creating CRD from file: {file_error}\033[0m")
+                    print(f"\033[93mFalling back to template CRD...\033[0m")
+            
+            # Fallback to template CRD
+            try:
+                api_ext.create_custom_resource_definition(CRD_TEMPLATE)
+                print(f"\033[92m✓ CRD {CRD_NAME} created from template.\033[0m")
+                return True
+            except Exception as template_error:
+                print(f"\033[91mError creating CRD from template: {template_error}\033[0m")
+                return False
         else:
-            raise
+            print(f"\033[91mError checking CRD: {e}\033[0m")
+            return False
+
+def deploy_cr_to_cluster(custom_api, cr_data, namespace=NAMESPACE):
+    """Deploy a Custom Resource to the cluster"""
+    try:
+        # Extract metadata
+        cr_name = cr_data['metadata']['name']
+        
+        # Check if CR already exists
+        try:
+            existing_cr = custom_api.get_namespaced_custom_object(
+                group=CRD_GROUP,
+                version=CRD_VERSION,
+                namespace=namespace,
+                plural=CRD_PLURAL,
+                name=cr_name
+            )
+            print(f"\033[93mCR {cr_name} already exists in cluster.\033[0m")
+            return existing_cr
+        except ApiException as e:
+            if e.status == 404:
+                # CR doesn't exist, create it
+                cr_data['metadata']['namespace'] = namespace
+                created_cr = custom_api.create_namespaced_custom_object(
+                    group=CRD_GROUP,
+                    version=CRD_VERSION,
+                    namespace=namespace,
+                    plural=CRD_PLURAL,
+                    body=cr_data
+                )
+                print(f"\033[92m✓ CR {cr_name} deployed to cluster.\033[0m")
+                return created_cr
+            else:
+                raise
+                
+    except Exception as e:
+        print(f"\033[91mError deploying CR to cluster: {e}\033[0m")
+        return None
 
 def run_playbook(spec):
     print(f"\033[94m→ Running playbook for VM: {spec.get('vmName', 'unknown')}\033[0m")
@@ -219,6 +300,49 @@ def main():
 
 
 # --- Urwid TUI Implementation ---
+class AutoSelectListBox(urwid.ListBox):
+    """Custom ListBox that automatically updates selection on focus change"""
+    def __init__(self, walker, app):
+        super().__init__(walker)
+        self.app = app
+        self._last_focus_position = None
+        # Set up connection to detect focus changes
+        urwid.connect_signal(walker, 'modified', self._on_walker_modified)
+    
+    def _on_walker_modified(self):
+        """Called when the walker is modified - check for focus changes"""
+        if hasattr(self, 'focus_position') and self.focus_position != self._last_focus_position:
+            self._last_focus_position = self.focus_position
+            if hasattr(self.app, 'current_selection'):
+                self.app.current_selection = self.focus_position
+                self.app.update_details(self.focus_position)
+    
+    def keypress(self, size, key):
+        # Handle the keypress first
+        result = super().keypress(size, key)
+        
+        # Check if focus position changed and update selection
+        if hasattr(self, 'focus_position') and self.focus_position != self._last_focus_position:
+            self._last_focus_position = self.focus_position
+            if hasattr(self.app, 'current_selection'):
+                self.app.current_selection = self.focus_position
+                self.app.update_details(self.focus_position)
+        
+        return result
+    
+    def mouse_event(self, size, event, button, col, row, focus):
+        """Handle mouse events and update selection"""
+        result = super().mouse_event(size, event, button, col, row, focus)
+        
+        # Check if focus position changed and update selection
+        if hasattr(self, 'focus_position') and self.focus_position != self._last_focus_position:
+            self._last_focus_position = self.focus_position
+            if hasattr(self.app, 'current_selection'):
+                self.app.current_selection = self.focus_position
+                self.app.update_details(self.focus_position)
+        
+        return result
+
 class VMListWidget(urwid.ListWalker):
     def __init__(self, vm_entries):
         self.vm_entries = vm_entries
@@ -250,6 +374,8 @@ class VMListWidget(urwid.ListWalker):
             attr = 'deployed'
         elif status == 'not_deployed':
             attr = 'not_deployed'
+        elif status == 'available':
+            attr = 'available'
         else:
             attr = 'error'
             
@@ -265,6 +391,7 @@ class VMApp:
             ('header', 'white', 'dark blue'),
             ('deployed', 'light green', 'black'),
             ('not_deployed', 'light red', 'black'),
+            ('available', 'light blue', 'black'),
             ('error', 'yellow', 'black'),
             ('selected', 'black', 'light gray'),
             ('details', 'light cyan', 'black'),
@@ -299,7 +426,7 @@ class VMApp:
         else:
             vm_list_items = [urwid.Text('No VMs found')]
             
-        self.vm_listbox = urwid.ListBox(urwid.SimpleFocusListWalker(vm_list_items))
+        self.vm_listbox = AutoSelectListBox(urwid.SimpleFocusListWalker(vm_list_items), self)
         vm_list_frame = urwid.LineBox(self.vm_listbox, title="VM List")
         
         # Details panel
@@ -329,7 +456,7 @@ class VMApp:
         ], dividechars=1)
         
         # Footer
-        footer = urwid.Text("Navigate: ↑/↓  Select: Enter  Edit: E  Redeploy: R  Refresh: F5  Quit: Q  (In dialogs: Esc/C to close, R to refresh)")
+        footer = urwid.Text("Navigate: ↑/↓  Select: Enter  Edit: E  Redeploy: R  Uninstall: U  Refresh: F5  Quit: Q")
         footer = urwid.AttrMap(footer, 'header')
         
         # Main frame
@@ -343,17 +470,48 @@ class VMApp:
         if self.vm_entries:
             self.update_details(0)
     
+    def sync_selection_from_focus(self):
+        """Sync current_selection with the actual listbox focus position"""
+        if hasattr(self, 'vm_listbox') and hasattr(self.vm_listbox, 'focus_position'):
+            if 0 <= self.vm_listbox.focus_position < len(self.vm_entries):
+                old_selection = self.current_selection
+                self.current_selection = self.vm_listbox.focus_position
+                # Update details if selection changed
+                if old_selection != self.current_selection:
+                    self.update_details(self.current_selection)
+                return True
+        return False
+
     def vm_selected(self, button, user_data):
-        self.current_selection = user_data
-        self.update_details(user_data)
+        """Handle VM selection from the list"""
+        if user_data is not None and 0 <= user_data < len(self.vm_entries):
+            self.current_selection = user_data
+            # Also sync the listbox focus position
+            if hasattr(self, 'vm_listbox'):
+                self.vm_listbox.focus_position = user_data
+            self.update_details(user_data)
+        else:
+            self.current_selection = 0
+            if hasattr(self, 'vm_listbox'):
+                self.vm_listbox.focus_position = 0
+            if self.vm_entries:
+                self.update_details(0)
     
     def update_details(self, vm_index):
         if 0 <= vm_index < len(self.vm_entries):
             entry = self.vm_entries[vm_index]
             spec = entry.get('spec', {})
+            vm_name = entry.get('vm_name', f'VM {vm_index + 1}')
+            status = entry.get('status', 'unknown')
+            
+            # Add header showing which VM is selected
+            details_lines = [
+                f"🔷 SELECTED: {vm_name} (#{vm_index + 1})",
+                f"Status: {status}",
+                "=" * 40
+            ]
             
             if spec:
-                details_lines = []
                 for key, value in spec.items():
                     line = f"{key}: {value}"
                     if len(line) > 50:
@@ -361,13 +519,17 @@ class VMApp:
                     details_lines.append(line)
                 details_text = '\n'.join(details_lines)
             else:
-                details_text = "No spec available"
+                details_lines.append("No spec available")
+                details_text = '\n'.join(details_lines)
                 
             self.details_text.set_text(('details', details_text))
         else:
             self.details_text.set_text("Select a VM to see details")
     
     def redeploy_vm(self, button):
+        # Sync selection from current focus position first
+        self.sync_selection_from_focus()
+        
         if 0 <= self.current_selection < len(self.vm_entries):
             entry = self.vm_entries[self.current_selection]
             spec = entry.get('spec')
@@ -375,11 +537,14 @@ class VMApp:
             
             if spec:
                 # Show confirmation dialog
-                self.show_redeploy_dialog(vm_name, spec)
+                self.show_redeploy_dialog(vm_name, spec, entry)
     
     def edit_manifest(self):
         """Open manifest editor for the selected VM"""
         try:
+            # Sync selection from current focus position first
+            self.sync_selection_from_focus()
+            
             if 0 <= self.current_selection < len(self.vm_entries):
                 entry = self.vm_entries[self.current_selection]
                 spec = entry.get('spec', {})
@@ -390,7 +555,7 @@ class VMApp:
                 else:
                     self.show_error_dialog("No specification found for this VM")
             else:
-                self.show_error_dialog("No VM selected")
+                self.show_error_dialog(f"No VM selected (current: {self.current_selection}, total: {len(self.vm_entries)})")
         except Exception as e:
             self.show_error_dialog(f"Error opening edit dialog: {str(e)}")
     
@@ -493,7 +658,91 @@ class VMApp:
             
         except Exception as e:
             self.show_error_dialog(f"Error opening edit dialog: {str(e)}")
-    
+
+    def uninstall_vm(self, button):
+        """Uninstall the selected VM"""
+        # Sync selection from current focus position first
+        self.sync_selection_from_focus()
+        
+        if 0 <= self.current_selection < len(self.vm_entries):
+            entry = self.vm_entries[self.current_selection]
+            spec = entry.get('spec')
+            vm_name = entry.get('vm_name', 'Unknown VM')
+            
+            if spec:
+                # Show confirmation dialog
+                self.show_uninstall_dialog(vm_name, spec, entry)
+
+    def show_uninstall_dialog(self, vm_name, spec, entry=None):
+        """Show confirmation dialog for uninstalling VM"""
+        message = f"⚠️ UNINSTALL VM '{vm_name}'?\n\nThis will permanently remove the VM and all its data.\n\nContinue?"
+        
+        def yes_pressed(button):
+            self.close_dialog()
+            # Start uninstall process
+            spec_copy = spec.copy()
+            spec_copy['action'] = 'uninstall'
+            # Ensure vm_name is in the spec for ansible
+            spec_copy['vm_name'] = vm_name
+            spec_copy['vmName'] = vm_name  # Some playbooks might use vmName instead
+            self.show_deployment_window(spec_copy, vm_name, is_edit=False, entry=entry)
+            
+        def no_pressed(button):
+            self.close_dialog()
+        
+        yes_btn = urwid.Button("Uninstall", on_press=yes_pressed)
+        no_btn = urwid.Button("Cancel", on_press=no_pressed)
+        yes_btn = urwid.AttrMap(yes_btn, 'button', 'button_focus')
+        no_btn = urwid.AttrMap(no_btn, 'button', 'button_focus')
+        
+        buttons = urwid.Columns([
+            ('pack', yes_btn),
+            ('pack', urwid.Text("  ")),
+            ('pack', no_btn)
+        ])
+        
+        content = urwid.Pile([
+            ('pack', urwid.Text(message)),
+            ('pack', urwid.Text("")),  # Spacer
+            ('pack', buttons)
+        ])
+        
+        dialog = urwid.LineBox(content, title="⚠️ Confirm Uninstall")
+        
+        self.overlay = urwid.Overlay(
+            dialog, self.main_frame,
+            align='center', width=50,
+            valign='middle', height=15
+        )
+        self.loop.widget = self.overlay
+
+    def show_info_dialog(self, message):
+        """Show an information dialog"""
+        info_text = urwid.Text(message)
+        ok_btn = urwid.Button("OK", on_press=lambda x: self.close_dialog())
+        ok_btn = urwid.AttrMap(ok_btn, 'button', 'button_focus')
+        
+        content = urwid.Pile([
+            ('pack', info_text),
+            ('pack', urwid.Text("")),
+            ('pack', ok_btn)
+        ])
+        
+        info_dialog = urwid.LineBox(content, title="Information")
+        
+        self.overlay = urwid.Overlay(
+            info_dialog, self.main_frame,
+            align='center', width=50,
+            valign='middle', height=10
+        )
+        self.loop.widget = self.overlay
+
+    def close_dialog(self):
+        """Close any open dialog and return to main interface"""
+        if hasattr(self, 'overlay'):
+            self.loop.widget = self.main_frame
+            del self.overlay
+
     def show_error_dialog(self, error_message):
         """Show an error dialog"""
         error_text = urwid.Text(error_message)
@@ -550,14 +799,14 @@ class VMApp:
         
         # Close the edit dialog and show deployment window
         self.close_dialog()
-        self.show_deployment_window(edited_spec, vm_name, is_edit=True)
+        self.show_deployment_window(edited_spec, vm_name, is_edit=True, entry=entry)
     
-    def show_redeploy_dialog(self, vm_name, spec):
+    def show_redeploy_dialog(self, vm_name, spec, entry=None):
         message = f"Redeploy VM '{vm_name}'?"
         
         def yes_pressed(button):
             self.close_dialog()
-            self.start_redeploy(spec, vm_name)
+            self.start_redeploy(spec, vm_name, entry)
             
         def no_pressed(button):
             self.close_dialog()
@@ -657,7 +906,7 @@ class VMApp:
             # If refresh fails, show error but don't crash
             self.details_text.set_text(f"Error refreshing VM list: {str(e)}")
     
-    def show_deployment_window(self, spec, vm_name, is_edit=False):
+    def show_deployment_window(self, spec, vm_name, is_edit=False, entry=None):
         """Show real-time deployment progress in a sub-window"""
         # Create a text widget for showing deployment output
         self.deployment_lines = []  # Store individual lines for better control
@@ -762,7 +1011,7 @@ class VMApp:
         def run_deployment():
             self.deployment_running = True
             try:
-                self.run_playbook_with_output(spec, vm_name)
+                self.run_playbook_with_output(spec, vm_name, entry)
             except Exception as e:
                 self.append_deployment_output(f"\nError during deployment: {str(e)}\n")
             finally:
@@ -804,39 +1053,69 @@ class VMApp:
             if hasattr(self, 'loop'):
                 self.loop.draw_screen()
     
-    def run_playbook_with_output(self, spec, vm_name):
+    def run_playbook_with_output(self, spec, vm_name, entry=None):
         """Run playbook and capture output for display"""
-        self.append_deployment_output(f"Deploying VM: {vm_name}\n")
+        action = spec.get('action', 'install')
+        action_word = "Uninstalling" if action == 'uninstall' else "Deploying"
+        
+        self.append_deployment_output(f"{action_word} VM: {vm_name}\n")
+        self.append_deployment_output(f"Action: {action}\n")
+        
+        # If this is a file-based CR and we're installing, deploy CR to cluster first
+        if entry and entry.get('source') == 'file' and action == 'install':
+            self.append_deployment_output("Deploying Custom Resource to cluster first...\n")
+            try:
+                load_kube_config()
+                custom_api = client.CustomObjectsApi()
+                cr_data = entry.get('cr_data')
+                if cr_data:
+                    deployed_cr = deploy_cr_to_cluster(custom_api, cr_data)
+                    if deployed_cr:
+                        self.append_deployment_output("✓ Custom Resource deployed to cluster successfully.\n")
+                    else:
+                        self.append_deployment_output("✗ Failed to deploy Custom Resource to cluster.\n")
+                        return
+                else:
+                    self.append_deployment_output("✗ No CR data found for file-based VM.\n")
+                    return
+            except Exception as e:
+                self.append_deployment_output(f"✗ Error deploying CR to cluster: {e}\n")
+                return
+        
         self.append_deployment_output(f"Parameters:\n")
         for key, value in spec.items():
             self.append_deployment_output(f"  {key}: {value}\n")
         self.append_deployment_output("\n" + "="*50 + "\n")
         
-        # Check if the VirtualMachine already exists
         kubevirt_namespace = spec.get('kubevirt_namespace', 'kubevirt')
         if not vm_name:
             self.append_deployment_output("No vmName specified in spec, skipping playbook.\n")
             return
-            
-        try:
-            load_kube_config()
-            k8s_api = client.CustomObjectsApi()
-            vm = k8s_api.get_namespaced_custom_object(
-                group="kubevirt.io",
-                version="v1",
-                namespace=kubevirt_namespace,
-                plural="virtualmachines",
-                name=vm_name
-            )
-            self.append_deployment_output(f"VirtualMachine {vm_name} already exists in namespace {kubevirt_namespace}. Skipping playbook.\n")
-            return
-        except ApiException as e:
-            if e.status != 404:
-                self.append_deployment_output(f"Error checking for existing VM: {e}\n")
-                return
-            # If 404, VM does not exist, proceed
         
-        # Run playbook if VM does not exist
+        # For uninstall, we don't need to check if VM exists - just run uninstall
+        if action == 'uninstall':
+            self.append_deployment_output(f"Uninstalling VirtualMachine {vm_name}...\n")
+        else:
+            # For install/deploy actions, check if VM already exists
+            try:
+                load_kube_config()
+                k8s_api = client.CustomObjectsApi()
+                vm = k8s_api.get_namespaced_custom_object(
+                    group="kubevirt.io",
+                    version="v1",
+                    namespace=kubevirt_namespace,
+                    plural="virtualmachines",
+                    name=vm_name
+                )
+                self.append_deployment_output(f"VirtualMachine {vm_name} already exists in namespace {kubevirt_namespace}. Skipping playbook.\n")
+                return
+            except ApiException as e:
+                if e.status != 404:
+                    self.append_deployment_output(f"Error checking for existing VM: {e}\n")
+                    return
+                # If 404, VM does not exist, proceed with install
+        
+        # Run playbook
         cmd = ["ansible-playbook", PLAYBOOK_PATH]
         for k, v in spec.items():
             # Convert booleans and numbers to strings for shell
@@ -889,10 +1168,10 @@ class VMApp:
         if hasattr(self, 'deployment_running'):
             delattr(self, 'deployment_running')
     
-    def start_redeploy(self, spec, vm_name):
+    def start_redeploy(self, spec, vm_name, entry=None):
         # Close the confirmation dialog and show deployment window
         self.close_dialog()
-        self.show_deployment_window(spec, vm_name, is_edit=False)
+        self.show_deployment_window(spec, vm_name, is_edit=False, entry=entry)
     
     def unhandled_input(self, key):
         # If we're in an overlay (dialog), don't handle any input here
@@ -903,24 +1182,28 @@ class VMApp:
         if key in ('q', 'Q', 'ctrl c'):
             raise urwid.ExitMainLoop()
         elif key in ('r', 'R'):
+            # Sync selection before redeploy
+            self.sync_selection_from_focus()
             self.redeploy_vm(None)
         elif key in ('e', 'E'):
+            # Sync selection before edit
+            self.sync_selection_from_focus()
             self.edit_manifest()
+        elif key in ('u', 'U'):
+            # Uninstall VM
+            self.sync_selection_from_focus()
+            self.uninstall_vm(None)
+        elif key == 'enter' and self.vm_entries:
+            # Enter key to show current selection info
+            self.sync_selection_from_focus()
+            if 0 <= self.current_selection < len(self.vm_entries):
+                entry = self.vm_entries[self.current_selection]
+                vm_name = entry.get('vm_name', f'VM {self.current_selection + 1}')
+                self.show_info_dialog(f"Selected: {vm_name}\n\nPress R to redeploy, E to edit, U to uninstall")
         elif key == 'f5':
             # Manual refresh
             self.refresh_vm_list()
-        elif key == 'up' and self.vm_entries:
-            # Move focus up in the list
-            if hasattr(self.vm_listbox, 'focus_position') and self.vm_listbox.focus_position > 0:
-                self.vm_listbox.focus_position -= 1
-                self.current_selection = self.vm_listbox.focus_position
-                self.update_details(self.current_selection)
-        elif key == 'down' and self.vm_entries:
-            # Move focus down in the list
-            if hasattr(self.vm_listbox, 'focus_position') and self.vm_listbox.focus_position < len(self.vm_entries) - 1:
-                self.vm_listbox.focus_position += 1
-                self.current_selection = self.vm_listbox.focus_position
-                self.update_details(self.current_selection)
+        # Note: up/down key handling is now done automatically by AutoSelectListBox
         # Return None to indicate we handled the input (or ignored it)
         return None
     
@@ -964,38 +1247,105 @@ def main():
     api_ext = client.ApiextensionsV1Api()
     custom_api = client.CustomObjectsApi()
 
-    ensure_crd_exists(api_ext)
+    # Ensure CRD exists (from file or template)
+    if not ensure_crd_exists(api_ext):
+        print("\033[91mFailed to ensure CRD exists. Exiting.\033[0m")
+        return
 
-    crs = custom_api.list_namespaced_custom_object(
-        group=CRD_GROUP,
-        version=CRD_VERSION,
-        namespace=NAMESPACE,
-        plural=CRD_PLURAL
-    )['items']
+    # Load CRs from cluster
+    print("\033[94m→ Loading CRs from Kubernetes cluster...\033[0m")
+    try:
+        cluster_crs = custom_api.list_namespaced_custom_object(
+            group=CRD_GROUP,
+            version=CRD_VERSION,
+            namespace=NAMESPACE,
+            plural=CRD_PLURAL
+        )['items']
+        print(f"\033[92m✓ Found {len(cluster_crs)} CRs in cluster\033[0m")
+    except Exception as e:
+        print(f"\033[91mError loading CRs from cluster: {e}\033[0m")
+        cluster_crs = []
 
+    # Load CRs from manifest-controller directory
+    print(f"\033[94m→ Loading CRs from {MANIFEST_CONTROLLER_DIR}...\033[0m")
+    file_crs = load_cr_files_from_directory(MANIFEST_CONTROLLER_DIR)
+    print(f"\033[92m✓ Found {len(file_crs)} CR files\033[0m")
+
+    # Create VM entries from both sources
     vm_entries = []
-    for cr in crs:
+    cr_names_seen = set()
+
+    # Process cluster CRs first
+    for cr in cluster_crs:
         spec = cr.get('spec', {})
         vm_name = spec.get('vmName')
+        cr_name = cr.get('metadata', {}).get('name', vm_name)
         kubevirt_namespace = spec.get('kubevirt_namespace', 'kubevirt')
+        
         if not vm_name:
             vm_entries.append({
-                'label': "No vmName in CR, skipping.",
+                'label': f"No vmName in CR {cr_name}, skipping.",
                 'status': 'error',
                 'spec': spec,
-                'kubevirt_namespace': kubevirt_namespace
+                'kubevirt_namespace': kubevirt_namespace,
+                'source': 'cluster',
+                'cr_name': cr_name
             })
             continue
+            
+        cr_names_seen.add(cr_name)
         deployed = vm_exists(vm_name, kubevirt_namespace)
-        label = f"{'✓' if deployed else '✗'} {vm_name}: {'Deployed' if deployed else 'Not deployed'}"
+        label = f"{'✓' if deployed else '✗'} {vm_name}: {'Deployed' if deployed else 'Not deployed'} [cluster]"
         vm_entries.append({
             'label': label,
             'status': 'deployed' if deployed else 'not_deployed',
             'spec': spec,
             'vm_name': vm_name,
-            'kubevirt_namespace': kubevirt_namespace
+            'kubevirt_namespace': kubevirt_namespace,
+            'source': 'cluster',
+            'cr_name': cr_name
         })
 
+    # Process file CRs (only add if not already in cluster)
+    for file_cr in file_crs:
+        cr_data = file_cr['data']
+        spec = cr_data.get('spec', {})
+        vm_name = spec.get('vmName')
+        cr_name = cr_data.get('metadata', {}).get('name', vm_name)
+        kubevirt_namespace = spec.get('kubevirt_namespace', 'kubevirt')
+        
+        if not vm_name:
+            vm_entries.append({
+                'label': f"No vmName in file CR {cr_name}, skipping.",
+                'status': 'error',
+                'spec': spec,
+                'kubevirt_namespace': kubevirt_namespace,
+                'source': 'file',
+                'cr_name': cr_name,
+                'file_path': file_cr['file_path']
+            })
+            continue
+
+        # Skip if already processed from cluster
+        if cr_name in cr_names_seen:
+            continue
+
+        cr_names_seen.add(cr_name)
+        deployed = vm_exists(vm_name, kubevirt_namespace)
+        file_label = f"{'✓' if deployed else '✗'} {vm_name}: {'Deployed' if deployed else 'Available for deployment'} [file]"
+        vm_entries.append({
+            'label': file_label,
+            'status': 'deployed' if deployed else 'available',
+            'spec': spec,
+            'vm_name': vm_name,
+            'kubevirt_namespace': kubevirt_namespace,
+            'source': 'file',
+            'cr_name': cr_name,
+            'file_path': file_cr['file_path'],
+            'cr_data': cr_data
+        })
+
+    print(f"\033[92m✓ Total VM entries: {len(vm_entries)}\033[0m")
     run_tui(vm_entries)
 
 # --- Entrypoint ---
