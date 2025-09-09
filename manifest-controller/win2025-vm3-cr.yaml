@@ -1,10 +1,13 @@
 apiVersion: infra.example.com/v1
 kind: WindowsVM
 metadata:
-  name: win2025-vm3
+  name: windows2025v3
   namespace: default
 spec:
-  action: install
+  # Declarative state management - no manual action editing needed
+  enabled: true    # true = VM should exist and run, false = VM should not exist
+  
+  # VM Configuration
   image: win2025server.vhdx
   installer_disk_size: 15Gi
   kubevirt_namespace: kubevirt
@@ -12,7 +15,7 @@ spec:
   system_disk_size: 40Gi
   vhdx_path: /data/vms/win2025server.vhdx
   virtio_iso_size: 500Mi
-  vmName: win2025-vm3
+  vmName: windows2025v3
   vm_cpu_cores: 4
   vm_memory: 8Gi
   windows_admin_password: Secret123%%

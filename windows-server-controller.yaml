@@ -27,7 +27,7 @@
         vm_memory: "{{ '8Gi' if windows_version == '2019' else '12Gi' }}"
         system_disk_size: "{{ '25Gi' if windows_version == '2019' else '30Gi' }}"
         vhd_filename: "{{ 'win2019server.vhd' if windows_version == '2019' else 'win2025server.vhdx' }}"
-        vm_name: "{{ 'win2019server' if windows_version == '2019' else 'win2025server' }}"
+        vm_name: "{{ vmName | default('win2019server' if windows_version == '2019' else 'win2025server') }}"
 
     - name: Set more version-specific variables
       ansible.builtin.set_fact:
