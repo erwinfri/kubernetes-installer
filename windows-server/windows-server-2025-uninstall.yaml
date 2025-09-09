@@ -126,57 +126,53 @@
         # Sysprep Secret
         - api_version: v1
           kind: Secret
-          name: win2025server-sysprep
+          name: "{{ vm_name }}-sysprep"
           namespaced: true
 
         # Services
         - api_version: v1
           kind: Service
-          name: win2025server-vnc
+          name: "{{ vm_name }}-vnc"
           namespaced: true
         - api_version: v1
           kind: Service
-          name: win2025server-rdp
+          name: "{{ vm_name }}-rdp"
           namespaced: true
         - api_version: v1
           kind: Service
-          name: win2025server-web
+          name: "{{ vm_name }}-winrm"
+          namespaced: true
+        - api_version: v1
+          kind: Service
+          name: "{{ vm_name }}-winrm-https"
           namespaced: true
 
-        # PVCs (remove both legacy and new names if present)
+        # PVCs (using vm_name variable)
         - api_version: v1
           kind: PersistentVolumeClaim
-          name: win2025server-installer-pvc
+          name: "{{ vm_name }}-installer-pvc"
           namespaced: true
         - api_version: v1
           kind: PersistentVolumeClaim
-          name: win2025server-system-pvc
+          name: "{{ vm_name }}-system-pvc"
           namespaced: true
         - api_version: v1
           kind: PersistentVolumeClaim
-          name: win2025server-virtio-iso-pvc
-          namespaced: true
-        - api_version: v1
-          kind: PersistentVolumeClaim
-          name: win2025server-iso-pvc
+          name: "{{ vm_name }}-virtio-iso-pvc"
           namespaced: true
 
-        # PVs (cluster-scoped; remove both legacy and new names)
+        # PVs (cluster-scoped; using vm_name variable)
         - api_version: v1
           kind: PersistentVolume
-          name: win2025server-installer-pv
+          name: "{{ vm_name }}-installer-pv"
           namespaced: false
         - api_version: v1
           kind: PersistentVolume
-          name: win2025server-system-pv
+          name: "{{ vm_name }}-system-pv"
           namespaced: false
         - api_version: v1
           kind: PersistentVolume
-          name: win2025server-virtio-iso-pv
-          namespaced: false
-        - api_version: v1
-          kind: PersistentVolume
-          name: win2025server-iso-pv
+          name: "{{ vm_name }}-virtio-iso-pv"
           namespaced: false
       ignore_errors: true
 
@@ -208,18 +204,18 @@
         path: "{{ item }}"
       register: storage_dirs
       loop:
-        - "{{ storage_dir }}/win2025server-system-disk"
-        - "{{ storage_dir }}/win2025server-installer"
-        - "{{ storage_dir }}/win2025server-virtio-iso"
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk"
+        - "{{ storage_dir }}/{{ vm_name }}-installer"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
         - "{{ storage_dir }}/Autounattend.xml"
 
     - name: Display storage cleanup information
       ansible.builtin.debug:
         msg:
           - "🗂️  Storage directories to be removed:"
-          - "  {{ storage_dir }}/win2025server-system-disk/ ({{ 'EXISTS' if storage_dirs.results[0].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/win2025server-installer/ ({{ 'EXISTS' if storage_dirs.results[1].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/win2025server-virtio-iso/ ({{ 'EXISTS' if storage_dirs.results[2].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/{{ vm_name }}-system-disk/ ({{ 'EXISTS' if storage_dirs.results[0].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/{{ vm_name }}-installer/ ({{ 'EXISTS' if storage_dirs.results[1].stat.exists else 'NOT FOUND' }})"
+          - "  {{ storage_dir }}/{{ vm_name }}-virtio-iso/ ({{ 'EXISTS' if storage_dirs.results[2].stat.exists else 'NOT FOUND' }})"
           - "  {{ storage_dir }}/Autounattend.xml ({{ 'EXISTS' if storage_dirs.results[3].stat.exists else 'NOT FOUND' }})"
 
     - name: Remove storage directories and files automatically
@@ -227,9 +223,9 @@
         path: "{{ item }}"
         state: absent
       loop:
-        - "{{ storage_dir }}/win2025server-system-disk"
-        - "{{ storage_dir }}/win2025server-installer"
-        - "{{ storage_dir }}/win2025server-virtio-iso"
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk"
+        - "{{ storage_dir }}/{{ vm_name }}-installer"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
         - "{{ storage_dir }}/Autounattend.xml"
 
     - name: Display storage removal result
@@ -248,8 +244,8 @@
       loop:
         - { api_version: "kubevirt.io/v1", kind: "VirtualMachine", name: "{{ vm_name }}", namespaced: true }
         - { api_version: "kubevirt.io/v1", kind: "VirtualMachineInstance", name: "{{ vm_name }}", namespaced: true }
-        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "win2025server-system-pvc", namespaced: true }
-        - { api_version: "v1", kind: "PersistentVolume", name: "win2025server-system-pv", namespaced: false }
+        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "{{ vm_name }}-system-pvc", namespaced: true }
+        - { api_version: "v1", kind: "PersistentVolume", name: "{{ vm_name }}-system-pv", namespaced: false }
       ignore_errors: true
 
     - name: Display cleanup verification
