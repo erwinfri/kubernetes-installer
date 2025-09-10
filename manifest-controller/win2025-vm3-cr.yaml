@@ -4,10 +4,7 @@ metadata:
   name: windows2025v3
   namespace: default
 spec:
-  # Declarative state management - no manual action editing needed
-  enabled: true    # true = VM should exist and run, false = VM should not exist
-  
-  # VM Configuration
+  enabled: true
   image: win2025server.vhdx
   installer_disk_size: 15Gi
   kubevirt_namespace: kubevirt
