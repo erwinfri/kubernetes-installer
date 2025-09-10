@@ -118,14 +118,11 @@ def get_comprehensive_status():
                             if cr_data and cr_data.get('kind') == 'WindowsVM':
                                 name = cr_data['metadata']['name']
                                 vm_name = cr_data['spec'].get('vmName', name)
-                                enabled = cr_data['spec'].get('enabled', True)
-                                # Keep action for backward compatibility but prefer enabled
-                                action = cr_data['spec'].get('action', 'install' if enabled else 'uninstall')
+                                action = cr_data['spec'].get('action', 'unknown')
                                 status_report['local_crs'][name] = {
                                     'file': file,
                                     'vm_name': vm_name,
-                                    'enabled': enabled,
-                                    'action': action,  # For display compatibility
+                                    'action': action,
                                     'namespace': cr_data['metadata'].get('namespace', 'default')
                                 }
                     except Exception as e:
@@ -143,13 +140,10 @@ def get_comprehensive_status():
             for cr in deployed_crs.get('items', []):
                 name = cr['metadata']['name']
                 vm_name = cr['spec'].get('vmName', name)
-                enabled = cr['spec'].get('enabled', True)
-                # Keep action for backward compatibility but prefer enabled
-                action = cr['spec'].get('action', 'install' if enabled else 'uninstall')
+                action = cr['spec'].get('action', 'unknown')
                 status_report['deployed_crs'][name] = {
                     'vm_name': vm_name,
-                    'enabled': enabled,
-                    'action': action,  # For display compatibility
+                    'action': action,
                     'namespace': cr['metadata'].get('namespace', 'default'),
                     'status': cr.get('status', {})
                 }
@@ -203,80 +197,40 @@ def get_comprehensive_status():
         for vm_name in all_vm_names:
             # Check local CR
             local_cr = None
-            local_enabled = None
             for cr_name, cr_data in status_report['local_crs'].items():
                 if cr_data['vm_name'] == vm_name:
                     local_cr = cr_name
-                    local_enabled = cr_data.get('enabled', True)
                     break
             
             # Check deployed CR
             deployed_cr = None
-            deployed_enabled = None
             for cr_name, cr_data in status_report['deployed_crs'].items():
                 if cr_data['vm_name'] == vm_name:
                     deployed_cr = cr_name
-                    deployed_enabled = cr_data.get('enabled', True)
                     break
             
             # Check running VM
             vm_running = vm_name in status_report['running_vms']
             vm_status = status_report['running_vms'].get(vm_name, {}).get('printable_status', 'NotExists')
             
-            # Determine scenario based on enabled state vs reality
+            # Determine scenario
             scenario = "Unknown"
-            issue_type = None
-            
-            if local_cr and not deployed_cr:
-                if local_enabled and not vm_running:
-                    scenario = "1A: Local CR (enabled) → No Instance"
-                    issue_type = "missing_deployment"
-                elif local_enabled and vm_running:
-                    scenario = "1B: Local CR (enabled) → Instance Running (Unmanaged)"
-                    issue_type = "unmanaged_vm"
-                elif not local_enabled and not vm_running:
-                    scenario = "1C: Local CR (disabled) → No Instance (Correct)"
-                elif not local_enabled and vm_running:
-                    scenario = "1D: Local CR (disabled) → Instance Running (Should Remove)"
-                    issue_type = "unexpected_vm"
-                    
-            elif not local_cr and deployed_cr:
-                if deployed_enabled and not vm_running:
-                    scenario = "2A: Deployed CR (enabled) → No Instance"
-                    issue_type = "vm_missing"
-                elif deployed_enabled and vm_running:
-                    scenario = "2B: Deployed CR (enabled) → Instance Running (Correct)"
-                elif not deployed_enabled and not vm_running:
-                    scenario = "2C: Deployed CR (disabled) → No Instance (Correct)"
-                elif not deployed_enabled and vm_running:
-                    scenario = "2D: Deployed CR (disabled) → Instance Running (Should Remove)"
-                    issue_type = "vm_should_be_disabled"
-                    
-            elif local_cr and deployed_cr:
-                local_state = "enabled" if local_enabled else "disabled"
-                deployed_state = "enabled" if deployed_enabled else "disabled"
-                vm_state = "running" if vm_running else "not running"
-                
-                if local_enabled == deployed_enabled:
-                    if local_enabled and vm_running:
-                        scenario = f"Mixed: Both CRs (enabled) → Instance Running (Correct)"
-                    elif local_enabled and not vm_running:
-                        scenario = f"Mixed: Both CRs (enabled) → No Instance"
-                        issue_type = "vm_missing"
-                    elif not local_enabled and not vm_running:
-                        scenario = f"Mixed: Both CRs (disabled) → No Instance (Correct)"
-                    elif not local_enabled and vm_running:
-                        scenario = f"Mixed: Both CRs (disabled) → Instance Running (Should Remove)"
-                        issue_type = "vm_should_be_disabled"
-                else:
-                    scenario = f"Mixed: Local CR ({local_state}) vs Deployed CR ({deployed_state}) → Instance {vm_state}"
-                    issue_type = "cr_state_mismatch"
-                    
+            if local_cr and not deployed_cr and not vm_running:
+                scenario = "1A: Local CR → No Instance"
+            elif local_cr and not deployed_cr and vm_running:
+                scenario = "1B: Local CR → Instance Running (Unmanaged)"
+            elif not local_cr and deployed_cr and not vm_running:
+                scenario = "2A: Deployed CR → No Instance"
+            elif not local_cr and deployed_cr and vm_running:
+                scenario = "2B: Deployed CR → Instance Running (Managed)"
+            elif local_cr and deployed_cr and not vm_running:
+                scenario = "Mixed: Local+Deployed CR → No Instance"
+            elif local_cr and deployed_cr and vm_running:
+                scenario = "Mixed: Local+Deployed CR → Instance Running"
             elif not local_cr and not deployed_cr and vm_running:
                 scenario = "3A: No CR → Instance Running (Orphaned)"
-                issue_type = "orphaned_vm"
             elif not local_cr and not deployed_cr and not vm_running:
-                scenario = "3B: No CR → Instance Deleted (Clean)"
+                scenario = "3B: No CR → Instance Deleted"
             
             status_report['scenarios'][vm_name] = {
                 'scenario': scenario,
@@ -284,10 +238,6 @@ def get_comprehensive_status():
                 'deployed_cr': deployed_cr,
                 'vm_running': vm_running,
                 'vm_status': vm_status,
-                'local_enabled': local_enabled,
-                'deployed_enabled': deployed_enabled,
-                'issue_type': issue_type,
-                # Keep backward compatibility
                 'local_cr_action': status_report['local_crs'].get(local_cr, {}).get('action', None) if local_cr else None,
                 'deployed_cr_action': status_report['deployed_crs'].get(deployed_cr, {}).get('action', None) if deployed_cr else None
             }
@@ -609,11 +559,11 @@ def configure(settings: kopf.OperatorSettings, **_):
 
 @kopf.on.create(CRD_GROUP, CRD_VERSION, CRD_PLURAL)
 async def create_vm(spec, name, namespace, logger, **kwargs):
-    """Handle WindowsVM CR creation - Use declarative enabled/disabled pattern"""
+    """Handle WindowsVM CR creation"""
     logger.info(f"WindowsVM CR created: {name} in namespace {namespace}")
     
     vm_name = spec.get('vmName')
-    enabled = spec.get('enabled', True)  # Default to enabled
+    action = spec.get('action', 'install')
     kubevirt_namespace = spec.get('kubevirt_namespace', 'kubevirt')
     
     if not vm_name:
@@ -623,17 +573,16 @@ async def create_vm(spec, name, namespace, logger, **kwargs):
         return {"message": error_msg}
     
     # Update status to processing
-    status_msg = f"VM should be {'enabled' if enabled else 'disabled'}"
-    update_cr_status(name, namespace, "Processing", status_msg)
+    update_cr_status(name, namespace, "Processing", f"Starting {action} for VM {vm_name}")
     
     try:
-        if enabled:
-            # VM should exist and be running
+        if action == 'install':
+            # Check detailed VM status instead of just existence
             vm_status = get_vm_status(vm_name, kubevirt_namespace)
             
             if vm_status['exists']:
                 if vm_status['is_running']:
-                    msg = f"VM {vm_name} already exists and is running - desired state achieved"
+                    msg = f"VM {vm_name} already exists and is running in namespace {kubevirt_namespace}"
                     logger.info(msg)
                     update_cr_status(name, namespace, "Running", msg)
                     return {"message": msg}
@@ -643,39 +592,31 @@ async def create_vm(spec, name, namespace, logger, **kwargs):
                     update_cr_status(name, namespace, "Exists", msg)
                     return {"message": msg}
             
-            # VM doesn't exist - install it
-            logger.info(f"Installing VM {vm_name} to achieve enabled state")
+            # Run installation playbook
             success = await run_ansible_playbook(spec, "install")
             
             if success:
-                update_cr_status(name, namespace, "Completed", f"VM {vm_name} enabled and deployed successfully")
-                return {"message": f"VM {vm_name} enabled and deployed successfully"}
+                update_cr_status(name, namespace, "Completed", f"VM {vm_name} deployed successfully")
+                return {"message": f"VM {vm_name} deployed successfully"}
             else:
-                update_cr_status(name, namespace, "Failed", f"Failed to enable VM {vm_name}")
-                raise kopf.PermanentError(f"Failed to enable VM {vm_name}")
+                update_cr_status(name, namespace, "Failed", f"Failed to deploy VM {vm_name}")
+                raise kopf.PermanentError(f"Failed to deploy VM {vm_name}")
                 
-        else:
-            # VM should not exist (disabled state)
-            logger.info(f"VM {vm_name} is disabled - ensuring it doesn't exist")
-            vm_status = get_vm_status(vm_name, kubevirt_namespace)
+        elif action == 'uninstall':
+            # Run uninstall playbook
+            success = await run_ansible_playbook(spec, "uninstall")
             
-            if vm_status['exists']:
-                # VM exists but should be disabled - remove it
-                logger.info(f"Removing existing VM {vm_name} to achieve disabled state")
-                success = await run_ansible_playbook(spec, "uninstall")
-                
-                if success:
-                    update_cr_status(name, namespace, "NotDeployed", f"VM {vm_name} disabled and removed successfully")
-                    return {"message": f"VM {vm_name} disabled and removed successfully"}
-                else:
-                    update_cr_status(name, namespace, "Failed", f"Failed to disable VM {vm_name}")
-                    raise kopf.PermanentError(f"Failed to disable VM {vm_name}")
+            if success:
+                update_cr_status(name, namespace, "Completed", f"VM {vm_name} uninstalled successfully")
+                return {"message": f"VM {vm_name} uninstalled successfully"}
             else:
-                # VM doesn't exist and shouldn't exist - desired state achieved
-                msg = f"VM {vm_name} is disabled and doesn't exist - desired state achieved"
-                logger.info(msg)
-                update_cr_status(name, namespace, "NotDeployed", msg)
-                return {"message": msg}
+                update_cr_status(name, namespace, "Failed", f"Failed to uninstall VM {vm_name}")
+                raise kopf.PermanentError(f"Failed to uninstall VM {vm_name}")
+        else:
+            error_msg = f"Unknown action: {action}. Supported actions: install, uninstall"
+            logger.error(error_msg)
+            update_cr_status(name, namespace, "Failed", error_msg)
+            raise kopf.PermanentError(error_msg)
             
     except Exception as e:
         error_msg = f"Error processing VM {vm_name}: {str(e)}"
@@ -685,12 +626,11 @@ async def create_vm(spec, name, namespace, logger, **kwargs):
 
 @kopf.on.update(CRD_GROUP, CRD_VERSION, CRD_PLURAL)
 async def update_vm(spec, name, namespace, old, new, diff, logger, **kwargs):
-    """Handle WindowsVM CR updates - Use declarative enabled/disabled pattern"""
+    """Handle WindowsVM CR updates"""
     logger.info(f"WindowsVM CR updated: {name} in namespace {namespace}")
     
     vm_name = spec.get('vmName')
-    enabled = spec.get('enabled', True)  # Default to enabled
-    kubevirt_namespace = spec.get('kubevirt_namespace', 'kubevirt')
+    action = spec.get('action', 'install')
     
     if not vm_name:
         error_msg = "No vmName specified in spec"
@@ -702,66 +642,23 @@ async def update_vm(spec, name, namespace, old, new, diff, logger, **kwargs):
     for operation, field_path, old_value, new_value in diff:
         logger.info(f"Field {field_path} {operation}: {old_value} -> {new_value}")
     
-    # Check if enabled state changed
-    old_enabled = old.get('spec', {}).get('enabled', True)
-    new_enabled = new.get('spec', {}).get('enabled', True)
-    
-    if old_enabled != new_enabled:
-        logger.info(f"Enabled state changed from {old_enabled} to {new_enabled}")
-        status_msg = f"Changing VM state to {'enabled' if new_enabled else 'disabled'}"
-        update_cr_status(name, namespace, "Processing", status_msg)
-    else:
-        logger.info(f"Enabled state unchanged ({new_enabled}) - ensuring desired state")
-        update_cr_status(name, namespace, "Processing", f"Ensuring VM {vm_name} is {'enabled' if enabled else 'disabled'}")
+    # Update status to processing
+    update_cr_status(name, namespace, "Processing", f"Updating VM {vm_name} with action {action}")
     
     try:
-        if enabled:
-            # VM should exist and be running
-            vm_status = get_vm_status(vm_name, kubevirt_namespace)
-            
-            if vm_status['exists'] and vm_status['is_running']:
-                msg = f"VM {vm_name} is already running - desired state achieved"
-                logger.info(msg)
-                update_cr_status(name, namespace, "Running", msg)
-                return {"message": msg}
-            
-            # VM should be enabled but isn't running - install/start it
-            logger.info(f"Enabling VM {vm_name}")
-            success = await run_ansible_playbook(spec, "install")
-            
-            if success:
-                update_cr_status(name, namespace, "Completed", f"VM {vm_name} enabled successfully")
-                return {"message": f"VM {vm_name} enabled successfully"}
-            else:
-                update_cr_status(name, namespace, "Failed", f"Failed to enable VM {vm_name}")
-                raise kopf.PermanentError(f"Failed to enable VM {vm_name}")
-                
+        # Run playbook with updated spec
+        success = await run_ansible_playbook(spec, action)
+        
+        if success:
+            update_cr_status(name, namespace, "Completed", f"VM {vm_name} updated successfully")
+            return {"message": f"VM {vm_name} updated successfully"}
         else:
-            # VM should not exist (disabled state)
-            vm_status = get_vm_status(vm_name, kubevirt_namespace)
+            update_cr_status(name, namespace, "Failed", f"Failed to update VM {vm_name}")
+            raise kopf.PermanentError(f"Failed to update VM {vm_name}")
             
-            if not vm_status['exists']:
-                msg = f"VM {vm_name} is already disabled - desired state achieved"
-                logger.info(msg)
-                update_cr_status(name, namespace, "NotDeployed", msg)
-                return {"message": msg}
-            
-            # VM exists but should be disabled - remove it
-            logger.info(f"Disabling VM {vm_name}")
-            success = await run_ansible_playbook(spec, "uninstall")
-            
-            if success:
-                update_cr_status(name, namespace, "NotDeployed", f"VM {vm_name} disabled successfully")
-                return {"message": f"VM {vm_name} disabled successfully"}
-            else:
-                update_cr_status(name, namespace, "Failed", f"Failed to disable VM {vm_name}")
-                raise kopf.PermanentError(f"Failed to disable VM {vm_name}")
-                
     except Exception as e:
         error_msg = f"Error updating VM {vm_name}: {str(e)}"
         logger.error(error_msg)
-        update_cr_status(name, namespace, "Failed", error_msg)
-        raise kopf.TemporaryError(error_msg, delay=60)
         update_cr_status(name, namespace, "Failed", error_msg)
         raise kopf.TemporaryError(error_msg, delay=60)
 
@@ -872,8 +769,10 @@ async def monitor_vm_status(spec, name, namespace, logger, **kwargs):
 class WindowsVMTUI:
     def __init__(self):
         self.log_lines = []
-        self.max_log_lines = 1000
+        self.max_log_lines = 500  # Reduced from 1000 to improve performance
         self.status_data = {}
+        self.last_status_update = 0  # Track last update time to reduce frequency
+        self.update_interval = 5  # Update status every 5 seconds instead of continuously
         
         # Create palette
         self.palette = [
@@ -895,6 +794,59 @@ class WindowsVMTUI:
         ]
         
         self.setup_ui()
+    
+    class MenuListBox(urwid.ListBox):
+        """Custom ListBox that handles Enter key for menu selection"""
+        
+        def __init__(self, body, callback=None, cancel_callback=None):
+            super().__init__(body)
+            self.selection_callback = callback
+            self.cancel_callback = cancel_callback
+            
+        def keypress(self, size, key):
+            if key == 'enter':
+                # Get the focused widget
+                focus_widget = self.focus
+                if focus_widget:
+                    # If it's an AttrMap, get the wrapped widget
+                    if hasattr(focus_widget, 'original_widget'):
+                        inner_widget = focus_widget.original_widget
+                    else:
+                        inner_widget = focus_widget
+                        
+                    # Check if it's a cancel item
+                    if hasattr(inner_widget, '_is_cancel') and inner_widget._is_cancel:
+                        if self.cancel_callback:
+                            self.cancel_callback()
+                        return None
+                    # Check if it's a data item
+                    elif hasattr(inner_widget, '_item_data'):
+                        if self.selection_callback:
+                            self.selection_callback(inner_widget._item_data)
+                        return None
+            # Handle navigation - let ListBox handle it properly
+            return super().keypress(size, key)
+    
+    class SimpleMenuItem(urwid.WidgetWrap):
+        """Simple menu item that works with proper navigation and visual feedback"""
+        
+        def __init__(self, text, data=None, is_cancel=False):
+            self.text = text
+            self._item_data = data
+            self._is_cancel = is_cancel
+            
+            # Use a Button for proper focus handling and visual feedback
+            button = urwid.Button(text, on_press=lambda x: None)
+            super().__init__(button)
+        
+        def selectable(self):
+            return True
+            
+        def keypress(self, size, key):
+            # Let the ListBox handle navigation, but don't let Button handle Enter
+            if key == 'enter':
+                return key  # Pass it up to ListBox to handle
+            return super().keypress(size, key)
         
     def setup_ui(self):
         # Header
@@ -905,11 +857,11 @@ class WindowsVMTUI:
         menu_items = [
             ('List VMs', self.list_vms),
             ('Status View', self.show_status),
+            ('Install VM', self.install_vm_menu),
+            ('Uninstall VM', self.uninstall_vm_menu),
+            ('Apply CRs', self.apply_cr_menu),
+            ('Delete CR', self.delete_cr_menu),
             ('Fix Issues', self.fix_issues),
-            ('Apply CRs', self.apply_manifests),
-            ('Create VM', self.create_vm),
-            ('Delete VM', self.delete_vm),
-            ('Refresh', self.refresh_display),
             ('Clear Logs', self.clear_logs),
             ('Quit', self.quit_app)
         ]
@@ -945,7 +897,7 @@ class WindowsVMTUI:
         ], dividechars=1, focus_column=1)  # Start with logs focused
         
         # Footer with updated navigation instructions
-        footer_text = "F2:Status F3:ListVMs F4:ClearLogs F5:Refresh F6:FixIssues F7:ApplyCRs F8:AutoScroll Tab:SwitchPanel Ctrl+C/Q:Quit"
+        footer_text = "F2:Status F3:ListVMs F4:ClearLogs F5:Refresh F6:InstallVM F7:UninstallVM F8:AutoScroll F9:Reset Tab:SwitchPanel Ctrl+C/Q:Quit"
         footer = urwid.Text(('footer', footer_text), align='center')
         footer = urwid.AttrMap(footer, 'footer')
         
@@ -998,6 +950,15 @@ class WindowsVMTUI:
     def update_status_display(self):
         """Update the status display with comprehensive VM/CR information"""
         try:
+            import time
+            current_time = time.time()
+            
+            # Throttle updates to prevent GUI slowdown
+            if current_time - self.last_status_update < self.update_interval:
+                return
+            
+            self.last_status_update = current_time
+            
             status_report = get_comprehensive_status()
             
             # Clear existing status display
@@ -1337,6 +1298,791 @@ class WindowsVMTUI:
                 
         except Exception as e:
             self.add_log_line(f"❌ Error fixing issue: {e}")
+
+    def show_action_menu(self):
+        """Show hierarchical action menu"""
+        try:
+            self.add_log_line("🎯 === ACTION MENU ===")
+            self.add_log_line("Select action type:")
+            self.add_log_line("1️⃣ Install VM")
+            self.add_log_line("2️⃣ Uninstall VM") 
+            self.add_log_line("3️⃣ Apply CR")
+            self.add_log_line("4️⃣ Delete CR")
+            self.add_log_line("5️⃣ Fix Issues (Smart)")
+            self.add_log_line("6️⃣ Generate CR for Orphaned VM")
+            self.add_log_line("")
+            self.add_log_line("Press 1-6 to select action type...")
+            
+            # Store the menu state
+            self.menu_state = 'action_selection'
+            self.pending_action = None
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing action menu: {e}")
+
+    def install_vm_menu(self, button):
+        """Show Install VM menu with dropdown selection"""
+        try:
+            self.add_log_line("🚀 === INSTALL VM MENU ===")
+            status_report = get_comprehensive_status()
+            
+            # Get VMs that can be installed (have local CRs but not running)
+            installable_vms = []
+            for vm_name, vm_data in status_report['local_crs'].items():
+                if vm_data.get('enabled', True):  # Only show enabled VMs
+                    scenario = status_report['scenarios'].get(vm_name, {}).get('scenario', '')
+                    if 'No Instance' in scenario or 'NotDeployed' in scenario:
+                        installable_vms.append({
+                            'name': vm_name,
+                            'file': vm_data['file'],
+                            'status': 'Ready to Install'
+                        })
+            
+            if not installable_vms:
+                self.add_log_line("❌ No VMs available for installation")
+                self.add_log_line("   (All VMs are either running or disabled)")
+                return
+            
+            # Show dropdown selection
+            self.show_vm_selection_dropdown("Install VM", installable_vms, self.execute_vm_install)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing install menu: {e}")
+
+    def uninstall_vm_menu(self, button):
+        """Show Uninstall VM menu with dropdown selection"""
+        try:
+            self.add_log_line("🗑️ === UNINSTALL VM MENU ===")
+            status_report = get_comprehensive_status()
+            
+            # Get VMs that can be uninstalled (currently running)
+            uninstallable_vms = []
+            for vm_name, scenario_data in status_report['scenarios'].items():
+                if 'Instance Running' in scenario_data['scenario']:
+                    # Check if we have a local CR to modify
+                    local_cr = status_report['local_crs'].get(vm_name)
+                    if local_cr:
+                        uninstallable_vms.append({
+                            'name': vm_name,
+                            'file': local_cr['file'],
+                            'status': 'Running - Can Uninstall'
+                        })
+                    else:
+                        uninstallable_vms.append({
+                            'name': vm_name,
+                            'file': None,
+                            'status': 'Running - No Local CR (Delete only)'
+                        })
+            
+            if not uninstallable_vms:
+                self.add_log_line("❌ No running VMs available for uninstallation")
+                return
+            
+            # Show dropdown selection
+            self.show_vm_selection_dropdown("Uninstall VM", uninstallable_vms, self.execute_vm_uninstall)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing uninstall menu: {e}")
+
+    def delete_cr_menu(self, button):
+        """Show Delete CR menu with dropdown selection"""
+        try:
+            self.add_log_line("🗑️ === DELETE CR MENU ===")
+            status_report = get_comprehensive_status()
+            
+            # Get deployed CRs that can be deleted
+            deletable_crs = []
+            for cr_name in status_report['deployed_crs']:
+                deletable_crs.append({
+                    'name': cr_name,
+                    'file': None,
+                    'status': 'Deployed - Can Delete'
+                })
+            
+            if not deletable_crs:
+                self.add_log_line("❌ No deployed CRs available for deletion")
+                return
+            
+            # Show dropdown selection
+            self.show_cr_selection_dropdown("Delete CR", deletable_crs, self.execute_cr_delete)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing delete CR menu: {e}")
+
+    def apply_cr_menu(self, button):
+        """Show Apply CR menu with dropdown selection"""
+        try:
+            self.add_log_line("📝 === APPLY CR MENU ===")
+            status_report = get_comprehensive_status()
+            
+            # Get local CRs that can be applied
+            applicable_crs = []
+            for cr_name, cr_data in status_report['local_crs'].items():
+                is_deployed = cr_name in status_report['deployed_crs']
+                status = "Already Deployed" if is_deployed else "Not Deployed"
+                applicable_crs.append({
+                    'name': cr_name,
+                    'file': cr_data['file'],
+                    'status': status,
+                    'deployed': is_deployed
+                })
+            
+            if not applicable_crs:
+                self.add_log_line("❌ No local CR files found to apply")
+                return
+            
+            # Add "Apply All" option
+            all_option = {
+                'name': 'ALL_CRS',
+                'file': None,
+                'status': f'Apply All {len(applicable_crs)} CRs',
+                'deployed': False
+            }
+            applicable_crs.insert(0, all_option)
+            
+            # Show dropdown selection
+            self.show_apply_cr_selection_dropdown("Apply CR", applicable_crs, self.execute_cr_apply)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing apply CR menu: {e}")
+
+    def show_apply_cr_selection_dropdown(self, title, crs, callback):
+        """Show a dropdown selection dialog for applying CRs"""
+        try:
+            # Create list of choices for dropdown
+            choices = []
+            for cr in crs:
+                if cr['name'] == 'ALL_CRS':
+                    icon = "🚀"
+                    choice_text = f"{icon} {cr['status']}"
+                else:
+                    icon = "✅" if cr['deployed'] else "📝"
+                    choice_text = f"{icon} {cr['name']} ({cr['status']})"
+                choices.append((choice_text, cr))
+            
+            # Create dropdown widget with simple, efficient menu items
+            dropdown_items = []
+            for choice_text, cr_data in choices:
+                # Use simple menu item
+                menu_item = self.SimpleMenuItem(choice_text, data=cr_data)
+                selectable_item = urwid.AttrMap(menu_item, 'menu', 'menu_focus')
+                dropdown_items.append(selectable_item)
+            
+            # Add cancel button (fix double AttrMap wrapping)
+            cancel_item = self.SimpleMenuItem("❌ Cancel", is_cancel=True)
+            cancel_selectable = urwid.AttrMap(cancel_item, 'error', 'error_focus')
+            dropdown_items.append(cancel_selectable)
+            
+            # Create the dropdown listbox with custom handling
+            walker = urwid.SimpleListWalker(dropdown_items)
+            listbox = self.MenuListBox(walker, callback=callback, cancel_callback=self.close_selection_dialog)
+            
+            # Create dialog
+            dialog_content = urwid.Pile([
+                urwid.Text(f"🎯 {title}", align='center'),
+                urwid.Divider(),
+                urwid.Text("Select CR to apply:", align='left'),
+                urwid.Divider(),
+                urwid.BoxAdapter(listbox, height=min(len(dropdown_items), 8)),
+                urwid.Divider(),
+                urwid.Text("Use ↑↓ arrows and Enter to select, or click", align='center')
+            ])
+            
+            # Create dialog box
+            dialog = urwid.LineBox(dialog_content, title=f"📝 {title}")
+            
+            # Create overlay
+            self.selection_overlay = urwid.Overlay(
+                dialog,
+                self.main_frame,
+                align='center',
+                width=60,
+                valign='middle',
+                height=min(len(dropdown_items) + 8, 20)
+            )
+            
+            # Store original loop widget and switch to overlay
+            self.original_widget = self.loop.widget
+            self.loop.widget = self.selection_overlay
+            
+            self.add_log_line(f"📋 {title} selection dialog opened")
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing apply CR selection dropdown: {e}")
+
+    def show_vm_selection_dropdown(self, title, vms, callback):
+        """Show a dropdown selection dialog for VMs"""
+        try:
+            # Create list of choices for dropdown
+            choices = []
+            for vm in vms:
+                status_icon = "�" if "Ready" in vm['status'] else "🟡" if "Running" in vm['status'] else "🔴"
+                choice_text = f"{status_icon} {vm['name']} ({vm['status']})"
+                choices.append((choice_text, vm))
+            
+            # Create dropdown widget with simple, efficient menu items
+            dropdown_items = []
+            for choice_text, vm_data in choices:
+                # Use simple menu item
+                menu_item = self.SimpleMenuItem(choice_text, data=vm_data)
+                selectable_item = urwid.AttrMap(menu_item, 'menu', 'menu_focus')
+                dropdown_items.append(selectable_item)
+            
+            # Add cancel button (fix double AttrMap wrapping)
+            cancel_item = self.SimpleMenuItem("❌ Cancel", is_cancel=True)
+            cancel_selectable = urwid.AttrMap(cancel_item, 'error', 'error_focus')
+            dropdown_items.append(cancel_selectable)
+            
+            # Create the dropdown listbox with custom handling
+            walker = urwid.SimpleListWalker(dropdown_items)
+            listbox = self.MenuListBox(walker, callback=callback, cancel_callback=self.close_selection_dialog)
+            
+            # Create dialog
+            dialog_content = urwid.Pile([
+                urwid.Text(f"🎯 {title}", align='center'),
+                urwid.Divider(),
+                urwid.Text("Select VM:", align='left'),
+                urwid.Divider(),
+                urwid.BoxAdapter(listbox, height=min(len(dropdown_items), 8)),
+                urwid.Divider(),
+                urwid.Text("Use ↑↓ arrows and Enter to select, or click", align='center')
+            ])
+            
+            # Create dialog box
+            dialog = urwid.LineBox(dialog_content, title=f"📦 {title}")
+            
+            # Create overlay
+            self.selection_overlay = urwid.Overlay(
+                dialog,
+                self.main_frame,
+                align='center',
+                width=60,
+                valign='middle',
+                height=min(len(dropdown_items) + 8, 20)
+            )
+            
+            # Store original loop widget and switch to overlay
+            self.original_widget = self.loop.widget
+            self.loop.widget = self.selection_overlay
+            
+            self.add_log_line(f"📋 {title} selection dialog opened")
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing selection dropdown: {e}")
+
+    def show_cr_selection_dropdown(self, title, crs, callback):
+        """Show a dropdown selection dialog for CRs"""
+        try:
+            # Create list of choices for dropdown
+            choices = []
+            for cr in crs:
+                choice_text = f"🗑️ {cr['name']} ({cr['status']})"
+                choices.append((choice_text, cr))
+            
+            # Create dropdown widget with simple, efficient menu items
+            dropdown_items = []
+            for choice_text, cr_data in choices:
+                # Use simple menu item
+                menu_item = self.SimpleMenuItem(choice_text, data=cr_data)
+                selectable_item = urwid.AttrMap(menu_item, 'menu', 'menu_focus')
+                dropdown_items.append(selectable_item)
+            
+            # Add cancel button (fix double AttrMap wrapping)
+            cancel_item = self.SimpleMenuItem("❌ Cancel", is_cancel=True)
+            cancel_selectable = urwid.AttrMap(cancel_item, 'error', 'error_focus')
+            dropdown_items.append(cancel_selectable)
+            
+            # Create the dropdown listbox with custom handling
+            walker = urwid.SimpleListWalker(dropdown_items)
+            listbox = self.MenuListBox(walker, callback=callback, cancel_callback=self.close_selection_dialog)
+            
+            # Create dialog
+            dialog_content = urwid.Pile([
+                urwid.Text(f"🎯 {title}", align='center'),
+                urwid.Divider(),
+                urwid.Text("Select CR:", align='left'),
+                urwid.Divider(),
+                urwid.BoxAdapter(listbox, height=min(len(dropdown_items), 8)),
+                urwid.Divider(),
+                urwid.Text("Use ↑↓ arrows and Enter to select, or click", align='center')
+            ])
+            
+            # Create dialog box
+            dialog = urwid.LineBox(dialog_content, title=f"🗑️ {title}")
+            
+            # Create overlay
+            self.selection_overlay = urwid.Overlay(
+                dialog,
+                self.main_frame,
+                align='center',
+                width=60,
+                valign='middle',
+                height=min(len(dropdown_items) + 8, 20)
+            )
+            
+            # Store original loop widget and switch to overlay
+            self.original_widget = self.loop.widget
+            self.loop.widget = self.selection_overlay
+            
+            self.add_log_line(f"📋 {title} selection dialog opened")
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing CR selection dropdown: {e}")
+
+    def reset_focus_and_navigation(self):
+        """Reset focus and navigation when stuck"""
+        try:
+            self.add_log_line("🔄 Resetting focus and navigation...")
+            
+            # Clear any stuck menu states
+            if hasattr(self, 'menu_state'):
+                self.menu_state = None
+            
+            # Close any open dialogs
+            if hasattr(self, 'selection_overlay'):
+                self.close_selection_dialog()
+            
+            # Reset to main widget if stuck in overlay
+            if hasattr(self, 'original_widget'):
+                self.loop.widget = self.original_widget
+                delattr(self, 'original_widget')
+            
+            # Reset focus to log panel (most reliable)
+            self.content_columns.focus_position = 1
+            self.update_focus_indicators()
+            
+            # Force a screen refresh
+            self.loop.screen.clear()
+            
+            self.add_log_line("✅ Navigation reset complete - try Tab/arrows/function keys")
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error resetting navigation: {e}")
+
+    def close_selection_dialog(self, button=None):
+        """Close the selection dialog and return to main interface"""
+        try:
+            if hasattr(self, 'original_widget'):
+                self.loop.widget = self.original_widget
+                delattr(self, 'original_widget')
+            if hasattr(self, 'selection_overlay'):
+                delattr(self, 'selection_overlay')
+            
+            # Clear any stuck menu states
+            if hasattr(self, 'menu_state'):
+                self.menu_state = None
+            
+            # Force focus back to main interface
+            self.content_columns.focus_position = 1  # Focus logs panel
+            self.update_focus_indicators()
+            
+            self.add_log_line("❌ Selection cancelled")
+        except Exception as e:
+            self.add_log_line(f"❌ Error closing dialog: {e}")
+
+    def execute_vm_install(self, button, vm_data):
+        """Execute VM installation from dropdown selection"""
+        try:
+            self.close_selection_dialog()
+            
+            if not vm_data.get('enabled', True):
+                self.add_log_line(f"⚠️ VM {vm_data['name']} is disabled (enabled: false)")
+                self.add_log_line("   Enable it in the CR file first")
+                return
+                
+            self.add_log_line(f"� Installing VM: {vm_data['name']}")
+            # Apply the CR to trigger installation
+            file_path = os.path.join("/root/kubernetes-installer/manifest-controller", vm_data['file'])
+            self.apply_local_cr_file(file_path)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error installing VM: {e}")
+
+    def execute_vm_uninstall(self, button, vm_data):
+        """Execute VM uninstallation from dropdown selection"""
+        try:
+            self.close_selection_dialog()
+            
+            self.add_log_line(f"🗑️ Uninstalling VM: {vm_data['name']}")
+            
+            if vm_data['file']:
+                # Modify CR to set enabled: false
+                self.modify_cr_enabled_state_by_file(vm_data['file'], False)
+            else:
+                # Just delete the deployed CR
+                self.delete_deployed_cr(vm_data['name'])
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Error uninstalling VM: {e}")
+
+    def execute_cr_delete(self, button, cr_data):
+        """Execute CR deletion from dropdown selection"""
+        try:
+            self.close_selection_dialog()
+            
+            self.add_log_line(f"🗑️ Deleting CR: {cr_data['name']}")
+            self.delete_deployed_cr(cr_data['name'])
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error deleting CR: {e}")
+
+    def execute_cr_apply(self, button, cr_data):
+        """Execute CR application from dropdown selection"""
+        try:
+            self.close_selection_dialog()
+            
+            if cr_data['name'] == 'ALL_CRS':
+                # Apply all CRs
+                self.add_log_line("🚀 Applying all local CR manifests...")
+                self.apply_manifests(None)
+            else:
+                # Apply single CR
+                self.add_log_line(f"📝 Applying CR: {cr_data['name']}")
+                file_path = os.path.join("/root/kubernetes-installer/manifest-controller", cr_data['file'])
+                self.apply_local_cr_file(file_path)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error applying CR: {e}")
+
+    def handle_menu_input(self, key):
+        """Handle menu input navigation - simplified for dropdown dialogs"""
+        # Most menu handling is now done through dropdown dialogs
+        # This function is kept for any remaining keyboard shortcuts
+        return False
+
+    def modify_cr_enabled_state_by_file(self, filename, enabled_state):
+        """Modify CR enabled state by filename and apply"""
+        try:
+            file_path = os.path.join("/root/kubernetes-installer/manifest-controller", filename)
+            
+            with open(file_path, 'r') as f:
+                cr_data = yaml.safe_load(f)
+            
+            cr_data['spec']['enabled'] = enabled_state
+            
+            with open(file_path, 'w') as f:
+                yaml.dump(cr_data, f, default_flow_style=False)
+            
+            state_text = "enabled" if enabled_state else "disabled"
+            vm_name = cr_data.get('metadata', {}).get('name', 'unknown')
+            self.add_log_line(f"✅ Modified CR {vm_name} to {state_text}")
+            
+            # Apply the modified CR
+            self.apply_local_cr_file(file_path)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error modifying CR: {e}")
+
+    def delete_deployed_cr(self, cr_name):
+        """Delete a deployed CR"""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['kubectl', 'delete', 'windowsvm', cr_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Deleted CR: {cr_name}")
+            else:
+                self.add_log_line(f"❌ Failed to delete CR: {result.stderr.strip()}")
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Error deleting CR: {e}")
+
+    def handle_menu_input(self, key):
+        """Handle menu input navigation"""
+        if not hasattr(self, 'menu_state'):
+            return False
+            
+        if self.menu_state == 'action_selection':
+            return self.handle_action_selection(key)
+        elif self.menu_state == 'entity_selection':
+            return self.handle_entity_selection(key)
+        elif self.menu_state == 'confirmation':
+            return self.handle_confirmation(key)
+            
+        return False
+
+    def handle_action_selection(self, key):
+        """Handle action type selection"""
+        action_map = {
+            '1': {'type': 'install', 'name': 'Install VM'},
+            '2': {'type': 'uninstall', 'name': 'Uninstall VM'},
+            '3': {'type': 'apply_cr', 'name': 'Apply CR'},
+            '4': {'type': 'delete_cr', 'name': 'Delete CR'},
+            '5': {'type': 'fix_issues', 'name': 'Fix Issues (Smart)'},
+            '6': {'type': 'generate_cr', 'name': 'Generate CR for Orphaned VM'}
+        }
+        
+        if key in action_map:
+            self.pending_action = action_map[key]
+            self.add_log_line(f"✅ Selected: {self.pending_action['name']}")
+            
+            if self.pending_action['type'] == 'fix_issues':
+                # Fix issues doesn't need entity selection
+                self.execute_fix_issues()
+                self.menu_state = None
+                return True
+            else:
+                # Show entity selection for other actions
+                self.show_entity_selection()
+                return True
+        elif key == 'escape':
+            self.add_log_line("❌ Action menu cancelled")
+            self.menu_state = None
+            return True
+            
+        return False
+
+    def show_entity_selection(self):
+        """Show entity selection based on action type"""
+        try:
+            action_type = self.pending_action['type']
+            self.add_log_line("")
+            self.add_log_line(f"🎯 {self.pending_action['name']} - Select Entity:")
+            
+            # Get available entities based on action type
+            entities = self.get_available_entities(action_type)
+            
+            if not entities:
+                self.add_log_line(f"❌ No entities available for {self.pending_action['name']}")
+                self.menu_state = None
+                return
+            
+            self.available_entities = entities
+            
+            for i, entity in enumerate(entities, 1):
+                status_icon = self.get_entity_status_icon(entity, action_type)
+                self.add_log_line(f"{status_icon} {i}. {entity['display_name']}")
+            
+            self.add_log_line("")
+            self.add_log_line(f"Press 1-{len(entities)} to select entity, ESC to cancel...")
+            self.menu_state = 'entity_selection'
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error showing entity selection: {e}")
+            self.menu_state = None
+
+    def get_available_entities(self, action_type):
+        """Get available entities based on action type"""
+        entities = []
+        
+        try:
+            status_report = get_comprehensive_status()
+            
+            if action_type in ['install', 'uninstall']:
+                # For install/uninstall, show VMs from local CRs
+                for vm_name, vm_data in status_report['local_crs'].items():
+                    entities.append({
+                        'type': 'vm',
+                        'name': vm_name,
+                        'display_name': f"VM: {vm_name}",
+                        'file': vm_data['file'],
+                        'enabled': vm_data.get('enabled', True)
+                    })
+                    
+            elif action_type in ['apply_cr', 'delete_cr']:
+                # For CR operations, show all available CRs
+                for cr_name, cr_data in status_report['local_crs'].items():
+                    entities.append({
+                        'type': 'cr',
+                        'name': cr_name,
+                        'display_name': f"CR: {cr_name}",
+                        'file': cr_data['file'],
+                        'deployed': cr_name in status_report['deployed_crs']
+                    })
+                    
+                # Also include deployed CRs for deletion
+                if action_type == 'delete_cr':
+                    for cr_name in status_report['deployed_crs']:
+                        if cr_name not in status_report['local_crs']:
+                            entities.append({
+                                'type': 'cr',
+                                'name': cr_name,
+                                'display_name': f"CR: {cr_name} (deployed only)",
+                                'file': None,
+                                'deployed': True
+                            })
+                            
+            elif action_type == 'generate_cr':
+                # For generate CR, show orphaned VMs
+                for vm_name, scenario_data in status_report['scenarios'].items():
+                    if '3A: No CR → Instance Running (Orphaned)' in scenario_data['scenario']:
+                        entities.append({
+                            'type': 'orphaned_vm',
+                            'name': vm_name,
+                            'display_name': f"Orphaned VM: {vm_name}",
+                            'file': None
+                        })
+                        
+        except Exception as e:
+            self.add_log_line(f"❌ Error getting entities: {e}")
+            
+        return entities
+
+    def get_entity_status_icon(self, entity, action_type):
+        """Get status icon for entity based on current state"""
+        if action_type == 'install':
+            return "🟢" if entity.get('enabled', True) else "🔴"
+        elif action_type == 'uninstall':
+            return "🟡"
+        elif action_type == 'apply_cr':
+            return "✅" if entity.get('deployed', False) else "📝"
+        elif action_type == 'delete_cr':
+            return "🗑️" if entity.get('deployed', False) else "📄"
+        elif action_type == 'generate_cr':
+            return "🔧"
+        return "📋"
+
+    def handle_entity_selection(self, key):
+        """Handle entity selection"""
+        if key == 'escape':
+            self.add_log_line("❌ Entity selection cancelled")
+            self.menu_state = None
+            return True
+            
+        try:
+            selection = int(key)
+            if 1 <= selection <= len(self.available_entities):
+                self.selected_entity = self.available_entities[selection - 1]
+                self.add_log_line(f"✅ Selected: {self.selected_entity['display_name']}")
+                
+                # Show confirmation
+                self.show_confirmation()
+                return True
+        except ValueError:
+            pass
+            
+        return False
+
+    def show_confirmation(self):
+        """Show confirmation before executing action"""
+        action_name = self.pending_action['name']
+        entity_name = self.selected_entity['display_name']
+        
+        self.add_log_line("")
+        self.add_log_line(f"🔍 CONFIRM ACTION:")
+        self.add_log_line(f"   Action: {action_name}")
+        self.add_log_line(f"   Target: {entity_name}")
+        self.add_log_line("")
+        self.add_log_line("Press Y to confirm, N to cancel...")
+        self.menu_state = 'confirmation'
+
+    def handle_confirmation(self, key):
+        """Handle confirmation input"""
+        if key.lower() == 'y':
+            self.add_log_line("✅ Action confirmed - Executing...")
+            self.execute_selected_action()
+            self.menu_state = None
+            return True
+        elif key.lower() == 'n' or key == 'escape':
+            self.add_log_line("❌ Action cancelled")
+            self.menu_state = None
+            return True
+            
+        return False
+
+    def execute_selected_action(self):
+        """Execute the selected action"""
+        try:
+            action_type = self.pending_action['type']
+            entity = self.selected_entity
+            
+            if action_type == 'install':
+                self.execute_install_vm(entity)
+            elif action_type == 'uninstall':
+                self.execute_uninstall_vm(entity)
+            elif action_type == 'apply_cr':
+                self.execute_apply_cr(entity)
+            elif action_type == 'delete_cr':
+                self.execute_delete_cr(entity)
+            elif action_type == 'generate_cr':
+                self.execute_generate_cr(entity)
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Error executing action: {e}")
+
+    def execute_install_vm(self, entity):
+        """Execute VM installation"""
+        if not entity.get('enabled', True):
+            self.add_log_line(f"⚠️ VM {entity['name']} is disabled (enabled: false)")
+            self.add_log_line("   Enable it in the CR file first")
+            return
+            
+        self.add_log_line(f"🚀 Installing VM: {entity['name']}")
+        # Apply the CR first, then the Kopf operator will handle installation
+        file_path = os.path.join("/root/kubernetes-installer/manifest-controller", entity['file'])
+        self.apply_local_cr_file(file_path)
+
+    def execute_uninstall_vm(self, entity):
+        """Execute VM uninstallation"""
+        self.add_log_line(f"🗑️ Uninstalling VM: {entity['name']}")
+        # Modify CR to set enabled: false, then apply
+        self.modify_cr_enabled_state(entity, False)
+
+    def execute_apply_cr(self, entity):
+        """Execute CR application"""
+        if entity['file']:
+            file_path = os.path.join("/root/kubernetes-installer/manifest-controller", entity['file'])
+            self.add_log_line(f"📝 Applying CR: {entity['name']}")
+            self.apply_local_cr_file(file_path)
+        else:
+            self.add_log_line(f"❌ No local file for CR: {entity['name']}")
+
+    def execute_delete_cr(self, entity):
+        """Execute CR deletion"""
+        self.add_log_line(f"🗑️ Deleting CR: {entity['name']}")
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['kubectl', 'delete', 'windowsvm', entity['name']],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Deleted CR: {entity['name']}")
+            else:
+                self.add_log_line(f"❌ Failed to delete CR: {result.stderr.strip()}")
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Error deleting CR: {e}")
+
+    def execute_generate_cr(self, entity):
+        """Execute CR generation for orphaned VM"""
+        self.add_log_line(f"🔧 Generating CR for orphaned VM: {entity['name']}")
+        self.generate_cr_for_vm(entity['name'])
+
+    def execute_fix_issues(self):
+        """Execute smart issue fixing"""
+        self.add_log_line("🔧 Executing smart issue analysis and fixes...")
+        self.fix_issues(None)
+
+    def modify_cr_enabled_state(self, entity, enabled_state):
+        """Modify CR enabled state and apply"""
+        try:
+            file_path = os.path.join("/root/kubernetes-installer/manifest-controller", entity['file'])
+            
+            with open(file_path, 'r') as f:
+                cr_data = yaml.safe_load(f)
+            
+            cr_data['spec']['enabled'] = enabled_state
+            
+            with open(file_path, 'w') as f:
+                yaml.dump(cr_data, f, default_flow_style=False)
+            
+            state_text = "enabled" if enabled_state else "disabled"
+            self.add_log_line(f"✅ Modified CR {entity['name']} to {state_text}")
+            
+            # Apply the modified CR
+            self.apply_local_cr_file(file_path)
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error modifying CR: {e}")
     
     def apply_manifests(self, button):
         """Apply all local CR manifests to the cluster"""
@@ -1557,35 +2303,44 @@ class WindowsVMTUI:
         return filtered_keys
     
     def unhandled_input(self, key):
+        # First check if we have a selection dialog open
+        if hasattr(self, 'selection_overlay'):
+            if key == 'escape':
+                self.close_selection_dialog()
+                return
+            # For dialogs, let the focused widget handle the input
+            return key
+        
+        # Check if we're in menu mode
+        if hasattr(self, 'menu_state') and self.menu_state:
+            if self.handle_menu_input(key):
+                return
+        
+        # Force focus reset if navigation seems stuck
+        if key in ('f9', 'f10'):
+            self.reset_focus_and_navigation()
+            return
+        
         if key in ('q', 'Q'):
             raise urwid.ExitMainLoop()
         elif key == 'ctrl c':
             # Handle CTRL+C properly
             self.add_log_line("🛑 CTRL+C pressed - Shutting down...")
             raise urwid.ExitMainLoop()
-        elif key == 'tab':
-            # Switch between status and log panels
-            current_focus = self.content_columns.focus_position
-            new_focus = 1 - current_focus  # Toggle between 0 and 1
-            self.content_columns.focus_position = new_focus
-            self.update_focus_indicators()
-            
-            # Update visual feedback
-            if new_focus == 0:
-                self.add_log_line("📊 Switched to Status Panel")
-            else:
-                self.add_log_line("📜 Switched to Log Panel")
         elif key == 'shift tab':
             # Reverse tab (same as tab for 2-panel layout)
-            current_focus = self.content_columns.focus_position
-            new_focus = 1 - current_focus
-            self.content_columns.focus_position = new_focus
-            self.update_focus_indicators()
-            
-            if new_focus == 0:
-                self.add_log_line("📊 Switched to Status Panel")
-            else:
-                self.add_log_line("📜 Switched to Log Panel")
+            try:
+                current_focus = self.content_columns.focus_position
+                new_focus = 1 - current_focus
+                self.content_columns.focus_position = new_focus
+                self.update_focus_indicators()
+                
+                if new_focus == 0:
+                    self.add_log_line("📊 Switched to Status Panel (Shift+Tab)")
+                else:
+                    self.add_log_line("📜 Switched to Log Panel (Shift+Tab)")
+            except Exception as e:
+                self.add_log_line(f"❌ Shift+Tab error: {e} - Try F9 to reset")
         elif key == 'f5':
             # F5 - Refresh everything
             self.update_status_display()
@@ -1600,11 +2355,11 @@ class WindowsVMTUI:
             # F4 - Clear logs
             self.clear_logs(None)
         elif key == 'f6':
-            # F6 - Fix Issues
-            self.fix_issues(None)
+            # F6 - Install VM Menu
+            self.install_vm_menu(None)
         elif key == 'f7':
-            # F7 - Apply CRs
-            self.apply_manifests(None)
+            # F7 - Uninstall VM Menu
+            self.uninstall_vm_menu(None)
         elif key == 'f8':
             # F8 - Toggle auto-scroll
             self.auto_scroll = not self.auto_scroll
@@ -1617,26 +2372,54 @@ class WindowsVMTUI:
                 except:
                     pass
         elif key in ('left', 'right'):
-            # Arrow keys for panel navigation
-            if key == 'left':
-                self.content_columns.focus_position = 0
-                self.update_focus_indicators()
-                self.add_log_line("📊 Moved to Status Panel (←)")
-            else:
-                self.content_columns.focus_position = 1
-                self.update_focus_indicators()
-                self.add_log_line("📜 Moved to Log Panel (→)")
+            # Arrow keys for panel navigation - make more robust
+            try:
+                if key == 'left':
+                    self.content_columns.focus_position = 0
+                    self.update_focus_indicators()
+                    self.add_log_line("📊 Moved to Status Panel (←)")
+                else:
+                    self.content_columns.focus_position = 1
+                    self.update_focus_indicators()
+                    self.add_log_line("📜 Moved to Log Panel (→)")
+            except Exception as e:
+                self.add_log_line(f"❌ Navigation error: {e} - Try F9 to reset")
         elif key in ('up', 'down', 'page up', 'page down'):
             # Handle scrolling in logs panel - disable auto-scroll when manually scrolling
-            if self.content_columns.focus_position == 1:  # Logs panel is focused
-                self.auto_scroll = False  # Disable auto-scroll when user manually scrolls
-            # Let these keys pass through to focused panel for scrolling
-            return key
+            try:
+                if self.content_columns.focus_position == 1:  # Logs panel is focused
+                    self.auto_scroll = False  # Disable auto-scroll when user manually scrolls
+                # Let these keys pass through to focused panel for scrolling
+                return key
+            except Exception as e:
+                self.add_log_line(f"❌ Scrolling error: {e} - Try F9 to reset")
+                return
         elif key == 'enter':
             # Handle enter key in focused panel
             return key
+        elif key == 'tab':
+            # Tab navigation - make more robust
+            try:
+                current_focus = self.content_columns.focus_position
+                new_focus = 1 - current_focus  # Toggle between 0 and 1
+                self.content_columns.focus_position = new_focus
+                self.update_focus_indicators()
+                
+                # Update visual feedback
+                if new_focus == 0:
+                    self.add_log_line("📊 Switched to Status Panel (Tab)")
+                else:
+                    self.add_log_line("📜 Switched to Log Panel (Tab)")
+            except Exception as e:
+                self.add_log_line(f"❌ Tab navigation error: {e} - Try F9 to reset")
         else:
-            # Let other keys pass through
+            # Let other keys pass through but log unhandled ones for debugging
+            if len(key) == 1 and key.isprintable():
+                # Don't log regular characters to avoid spam
+                pass
+            else:
+                # Log special keys for debugging
+                self.add_log_line(f"🔍 Unhandled key: {key}")
             return key
     
     def run(self):
