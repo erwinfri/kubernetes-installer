@@ -8,6 +8,7 @@ import logging
 import subprocess
 import os
 import yaml
+from datetime import datetime
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 import queue
@@ -26,6 +27,14 @@ operator_file_handler = logging.FileHandler(operator_log_path, mode='a')
 operator_file_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
 operator_file_handler.setLevel(logging.INFO)
 logger.addHandler(operator_file_handler)
+
+# Optionally suppress noisy Kopf inconsistency logs (set env KOPF_SUPPRESS_INCONSISTENCIES=1)
+try:
+    if os.getenv('KOPF_SUPPRESS_INCONSISTENCIES', '0') == '1':
+        for name in ('kopf.objects', 'kopf.activities', 'kopf.clients.patching'):
+            logging.getLogger(name).setLevel(logging.WARNING)
+except Exception:
+    pass
 
 # Resource definitions
 RESOURCES = {
@@ -50,18 +59,34 @@ def setup_kopf_handlers():
     """Set up all Kopf handlers for different resource types"""
     logger.info("Setting up Kopf handlers for Windows services...")
 
+
+# Configure Kopf persistence to reduce status conflicts
+@kopf.on.startup()
+def configure_kopf(settings: kopf.OperatorSettings, **_):
+    try:
+        # Move Kopf's internal progress/diffbase storage to annotations to avoid touching .status
+        settings.persistence.progress_storage = kopf.AnnotationsProgressStorage(prefix='kopf.windowsvm.dev')
+        settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage(prefix='kopf.windowsvm.dev')
+        # Keep posting/info defaults; adjust if you want quieter logs
+        logger.info("[OPERATOR] Kopf persistence configured to use annotations for progress/diffbase")
+    except Exception as e:
+        logger.warning(f"[OPERATOR] Failed to configure Kopf persistence: {e}")
+
 # WindowsVM Handlers
 @kopf.on.create('infra.example.com', 'v1', 'windowsvms')
 @kopf.on.update('infra.example.com', 'v1', 'windowsvms')
-def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwargs):
+def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch, **kwargs):
     # Guard: skip if already terminal phase
     terminal_phases = ['Ready', 'Failed', 'Skipped']
-    if status and status.get('phase') in terminal_phases:
+    if status and status.get('phase') in terminal_phases and status.get('observedGeneration') == meta.get('generation'):
         msg = f"[OPERATOR] Skipping execution for {meta.get('name')} (phase={status.get('phase')})"
         logger.info(msg)
         if log_queue:
             log_queue.put(msg)
-        return {'phase': status.get('phase'), 'message': status.get('message', '')}
+        patch.status['phase'] = status.get('phase')
+        patch.status['message'] = status.get('message', '')
+        patch.status['observedGeneration'] = status.get('observedGeneration')
+        return
     logger.info("[OPERATOR] handle_windowsvm triggered!")
     if log_queue:
         log_queue.put("[OPERATOR] handle_windowsvm triggered!")
@@ -78,6 +103,24 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwar
     logger.info(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
     if log_queue:
         log_queue.put(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
+    # Mark as InProgress at the beginning of processing
+    try:
+        patch.status['phase'] = 'InProgress'
+        patch.status['message'] = f"{action.title()} in progress for VM {vm_name}"
+        patch.status['reason'] = 'Processing'
+        patch.status['observedGeneration'] = meta.get('generation')
+        now = datetime.utcnow().isoformat() + 'Z'
+        cond = {
+            'type': 'Ready',
+            'status': 'False',
+            'reason': 'Processing',
+            'message': f"{action.title()} in progress for VM {vm_name}",
+            'lastTransitionTime': now,
+        }
+        existing = status.get('conditions', []) if status else []
+        patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+    except Exception:
+        pass
     import time
     max_retries = 5
     retry_delay = 1  # seconds
@@ -123,33 +166,7 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwar
                 log_queue.put(f"[OPERATOR] Unknown action: {action}, skipping.")
             return {'phase': 'Skipped', 'message': f'Unknown action: {action}'}
 
-        # Patch status with retries
-        def patch_status_with_retries(phase, message):
-            # Kopf will patch status from the returned dict, so we just return it.
-            # We suppress noisy patching inconsistency logs by not raising or logging unless all retries fail.
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return {'phase': phase, 'message': message}
-                except ApiException as e:
-                    if e.status == 409:  # Conflict
-                        if attempt == max_retries:
-                            logger.warning(f"[OPERATOR] Status patch conflict after {max_retries} attempts. Suppressing further warnings.")
-                            if log_queue:
-                                log_queue.put(f"[OPERATOR] Status patch conflict after {max_retries} attempts. Suppressing further warnings.")
-                        else:
-                            # Do not log every retry, only final failure
-                            time.sleep(retry_delay)
-                    else:
-                        logger.error(f"[OPERATOR] Status patch failed: {e}")
-                        if log_queue:
-                            log_queue.put(f"[OPERATOR] Status patch failed: {e}")
-                        break
-            # Only log if all retries failed
-            logger.error(f"[OPERATOR] Status patch failed after {max_retries} attempts.")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Status patch failed after {max_retries} attempts.")
-            return {'phase': phase, 'message': message}
-
+        # Kopf expects a dict with top-level status keys to patch .status
         if result['success']:
             logger.info(f"[OPERATOR] Playbook succeeded for {action} on VM {vm_name}")
             if log_queue:
@@ -159,7 +176,21 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwar
                 if log_queue:
                     for line in result['output'].splitlines():
                         log_queue.put(f"[PLAYBOOK] {line}")
-            return patch_status_with_retries('Ready', f"VM {vm_name} {action} completed successfully")
+            patch.status['phase'] = 'Ready'
+            patch.status['message'] = f"VM {vm_name} {action} completed successfully"
+            patch.status['reason'] = 'Completed'
+            patch.status['observedGeneration'] = meta.get('generation')
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'True',
+                'reason': 'Completed',
+                'message': f"VM {vm_name} {action} completed successfully",
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
         else:
             logger.info(f"[OPERATOR] Playbook failed for {action} on VM {vm_name}: {result['error']}")
             if log_queue:
@@ -169,7 +200,21 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwar
                 if log_queue:
                     for line in result['output'].splitlines():
                         log_queue.put(f"[PLAYBOOK] {line}")
-            return patch_status_with_retries('Failed', f"Failed to {action} VM: {result['error']}")
+            patch.status['phase'] = 'Failed'
+            patch.status['message'] = f"Failed to {action} VM: {result['error']}"
+            patch.status['reason'] = 'Error'
+            patch.status['observedGeneration'] = meta.get('generation')
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'False',
+                'reason': 'Error',
+                'message': f"Failed to {action} VM: {result['error']}",
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
     except Exception as e:
         error_msg = f"[OPERATOR] Error processing WindowsVM {name}: {e}"
         logger.error(error_msg)
@@ -181,7 +226,58 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, **kwar
             logger.warning(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
             if log_queue:
                 log_queue.put(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
-        return {'phase': 'Failed', 'message': error_msg}
+        patch.status['phase'] = 'Failed'
+        patch.status['message'] = error_msg
+        patch.status['reason'] = 'Exception'
+        patch.status['observedGeneration'] = meta.get('generation')
+        return
+
+
+# Resume handler to refresh status after operator restarts
+@kopf.on.resume('infra.example.com', 'v1', 'windowsvms')
+def resume_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
+    name = meta.get('name')
+    vm_name = spec.get('vmName', name)
+    vm_ns = spec.get('kubevirt_namespace', namespace)
+    try:
+        st = check_target_vm_status(vm_name, vm_ns)
+        now = datetime.utcnow().isoformat() + 'Z'
+        if st['ready']:
+            patch.status['phase'] = 'Ready'
+            patch.status['message'] = f"VM {vm_name} is running ({st['message']})"
+            patch.status['reason'] = 'Resumed'
+            patch.status['observedGeneration'] = meta.get('generation')
+            cond = {
+                'type': 'Ready', 'status': 'True', 'reason': 'Resumed',
+                'message': patch.status['message'], 'lastTransitionTime': now,
+            }
+        else:
+            patch.status['phase'] = 'Pending'
+            patch.status['message'] = st['message']
+            patch.status['reason'] = 'Resumed'
+            patch.status['observedGeneration'] = meta.get('generation')
+            cond = {
+                'type': 'Ready', 'status': 'False', 'reason': 'Resumed',
+                'message': st['message'], 'lastTransitionTime': now,
+            }
+        existing = status.get('conditions', []) if status else []
+        patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+    except Exception as e:
+        patch.status['phase'] = 'Unknown'
+        patch.status['message'] = f"Error on resume: {e}"
+        patch.status['reason'] = 'Exception'
+        patch.status['observedGeneration'] = meta.get('generation')
+
+
+# Delete handler to mark terminating status
+@kopf.on.delete('infra.example.com', 'v1', 'windowsvms')
+def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
+    name = meta.get('name')
+    vm_name = spec.get('vmName', name)
+    patch.status['phase'] = 'Terminating'
+    patch.status['message'] = f"Delete requested for VM {vm_name}"
+    patch.status['reason'] = 'DeleteRequested'
+    patch.status['observedGeneration'] = meta.get('generation')
 
 # MSSQLServer Handlers
 @kopf.on.create('infra.example.com', 'v1', 'mssqlservers')
