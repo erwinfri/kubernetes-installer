@@ -119,6 +119,61 @@ ansible-playbook windows-server-unified-controller.yaml -e action=install -e win
 
 ## Troubleshooting
 
+### Kopf status patch warnings (inconsistencies)
+If you see messages like "Patching failed with inconsistencies" from Kopf when updating CR status, ensure your CRDs:
+- Enable the status subresource
+- Define a `status` schema
+
+Example CRD snippet:
+```yaml
+versions:
+	- name: v1
+		served: true
+		storage: true
+		subresources:
+			status: {}
+		schema:
+			openAPIV3Schema:
+				type: object
+				properties:
+					spec:
+						type: object
+						# ...
+					status:
+						type: object
+						properties:
+							phase:
+								type: string
+							message:
+								type: string
+							reason:
+								type: string
+							observedGeneration:
+								type: integer
+							conditions:
+								type: array
+								items:
+									type: object
+									properties:
+										type:
+											type: string
+										status:
+											type: string
+											enum: ["True", "False", "Unknown"]
+										lastTransitionTime:
+											type: string
+											format: date-time
+										reason:
+											type: string
+										message:
+											type: string
+```
+
+Then re-apply the CRD:
+```bash
+kubectl apply -f <crd-file>.yaml
+```
+
 ### Stuck VM Deletion:
 If VMs get stuck during uninstall, use the manual cleanup script:
 ```bash
