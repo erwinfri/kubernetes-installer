@@ -1,7 +1,7 @@
 apiVersion: infra.example.com/v1
 kind: WindowsVM
 metadata:
-  name: windows2025v3
+  name: win2025server
   namespace: default
 spec:
   enabled: true
@@ -12,7 +12,7 @@ spec:
   system_disk_size: 40Gi
   vhdx_path: /data/vms/win2025server.vhdx
   virtio_iso_size: 500Mi
-  vmName: windows2025v3
+  vmName: win2025server
   vm_cpu_cores: 4
   vm_memory: 8Gi
   windows_admin_password: Secret123%%

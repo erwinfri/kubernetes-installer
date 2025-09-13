@@ -1,0 +1,22 @@
+  - name: Vault HashiCorp Controller
+    hosts: localhost
+    connection: local
+    gather_facts: false
+    vars:
+      action: install
+    tasks:
+      - name: Run install tasks
+        include_tasks: vault-hashicorp/vault-hashicorp-install.yaml
+        when: action == 'install'
+
+      - name: Run uninstall tasks
+        include_tasks: vault-hashicorp/vault-hashicorp-uninstall.yaml
+        when: action == 'uninstall'
+
+      - name: Run status tasks
+        include_tasks: vault-hashicorp/vault-hashicorp-status.yaml
+        when: action == 'status'
+
+      - name: Run otel tasks
+        include_tasks: vault-hashicorp/vault-hashicorp-otel.yaml
+        when: action == 'otel'

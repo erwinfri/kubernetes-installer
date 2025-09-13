@@ -6,7 +6,6 @@
   become: yes
   vars:
     # Basic settings
-    kubevirt_namespace: kubevirt
     vm_cpu_model: host-model
     vm_cpu_sockets: 1
     vm_cpu_threads: 1
@@ -20,6 +19,9 @@
       ansible.builtin.set_fact:
         action: "{{ action | default('install') }}"
         windows_version: "{{ windows_version | default('2019') }}"
+    - name: Set kubevirt_namespace default if not provided
+      ansible.builtin.set_fact:
+        kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
 
     - name: Set version-specific variables
       ansible.builtin.set_fact:

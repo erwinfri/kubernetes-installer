@@ -1,0 +1,10 @@
+windows:
+  hosts:
+    winhost:
+      ansible_host: 127.0.0.1
+      ansible_port: 5985
+      ansible_user: Administrator
+      ansible_password: "SecureP@ssw0rd!"
+      ansible_connection: winrm
+      ansible_winrm_transport: basic
+      ansible_winrm_server_cert_validation: ignore

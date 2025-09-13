@@ -1,0 +1,4 @@
+---
+# Requirements for Windows Server Vault integration
+collections:
+  - name: community.hashi_vault
