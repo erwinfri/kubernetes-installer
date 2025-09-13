@@ -1,0 +1,172 @@
+---
+# Kubernetes Uninstall Tasks (included by controller)
+# Assumes localhost context & become already set by controller.
+
+- name: Set uninstall variables
+  ansible.builtin.set_fact:
+    k8s_packages: [ 'kubelet', 'kubeadm', 'kubectl' ]
+    k8s_dirs:
+      - /etc/kubernetes
+      - /var/lib/etcd
+      - /var/lib/kubelet
+      - /var/lib/dockershim
+      - /var/lib/cni
+      - /opt/cni
+      - /run/flannel
+      - /var/lib/calico
+      - /etc/cni/net.d
+      - /root/.kube
+  when: k8s_packages is not defined or k8s_dirs is not defined
+
+- name: Display uninstall start message
+  ansible.builtin.debug:
+    msg:
+      - "=== Starting comprehensive Kubernetes uninstall ==="
+      - "This will remove Kubernetes, configs, CNI artifacts, and iptables entries."
+      - "WARNING: This is destructive!"
+
+- name: Check if kubeadm is installed
+  ansible.builtin.command: bash -lc 'command -v kubeadm'
+  register: kubeadm_check
+  ignore_errors: true
+  changed_when: false
+
+- name: Gather cluster info (if possible)
+  ansible.builtin.command: kubectl get nodes -o wide
+  register: pre_nodes
+  changed_when: false
+  ignore_errors: true
+
+- name: Show cluster nodes before removal
+  ansible.builtin.debug:
+    var: pre_nodes.stdout_lines
+  when: pre_nodes.rc == 0
+
+- name: Save pod summary (if possible)
+  ansible.builtin.command: kubectl get pods -A
+  register: pre_pods
+  changed_when: false
+  ignore_errors: true
+
+- name: Run kubeadm reset (if installed)
+  ansible.builtin.command: kubeadm reset -f
+  register: kubeadm_reset
+  when: kubeadm_check.rc == 0
+  ignore_errors: true
+
+- name: Show kubeadm reset output
+  ansible.builtin.debug:
+    var: kubeadm_reset.stdout_lines
+  when: kubeadm_reset is defined
+
+- name: Stop kubelet if present
+  ansible.builtin.systemd:
+    name: kubelet
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+- name: Detect container runtime service
+  ansible.builtin.shell: |
+    for svc in containerd crio docker; do
+      systemctl is-active --quiet $svc && echo $svc && break
+    done
+  register: runtime_service
+  changed_when: false
+
+- name: Stop container runtime (if detected)
+  ansible.builtin.systemd:
+    name: "{{ runtime_service.stdout }}"
+    state: stopped
+    enabled: false
+  when: runtime_service.stdout != ''
+  ignore_errors: true
+
+- name: Remove Kubernetes packages
+  ansible.builtin.package:
+    name: "{{ k8s_packages }}"
+    state: absent
+
+- name: Remove residual kubectl completion (if any)
+  ansible.builtin.file:
+    path: /etc/bash_completion.d/kubectl
+    state: absent
+  ignore_errors: true
+
+- name: Remove Kubernetes related directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ k8s_dirs }}"
+  ignore_errors: true
+
+- name: Flush iptables filter table
+  ansible.builtin.command: iptables -F
+  ignore_errors: true
+
+- name: Flush iptables nat table
+  ansible.builtin.command: iptables -t nat -F
+  ignore_errors: true
+
+- name: Flush iptables mangle table
+  ansible.builtin.command: iptables -t mangle -F
+  ignore_errors: true
+
+- name: Delete CNI network interfaces (best-effort)
+  ansible.builtin.shell: |
+    for iface in cni0 flannel.1 flannel-v6 cbr0 docker0; do
+      ip link show "$iface" >/dev/null 2>&1 && ip link delete "$iface" || true
+    done
+  register: iface_cleanup
+  changed_when: iface_cleanup.rc == 0
+  ignore_errors: true
+
+- name: Remove leftover etcd data (alternate path)
+  ansible.builtin.file:
+    path: /var/lib/etcd
+    state: absent
+  ignore_errors: true
+
+- name: Clean journal entries for kubelet (optional)
+  ansible.builtin.shell: journalctl --rotate && journalctl --vacuum-time=1s
+  changed_when: false
+  ignore_errors: true
+
+- name: Remove kube binaries (if still present)
+  ansible.builtin.file:
+    path: "/usr/bin/{{ item }}"
+    state: absent
+  loop: [ 'kubeadm', 'kubelet', 'kubectl' ]
+  ignore_errors: true
+
+- name: Verify removal of kubelet service file
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/kubelet.service
+  register: kubelet_service_file
+
+- name: Force daemon-reload if kubelet service removed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: not kubelet_service_file.stat.exists
+
+- name: Display uninstall summary
+  ansible.builtin.debug:
+    msg:
+      - "✅ Kubernetes uninstall complete."
+      - "Removed packages: {{ k8s_packages | join(', ') }}"
+      - "Directories purged: {{ k8s_dirs | join(', ') }}"
+      - "Runtime stopped: {{ runtime_service.stdout | default('none detected') }}"
+      - "Interfaces cleanup attempted: cni0, flannel.1, flannel-v6, cbr0, docker0"
+      - "If you plan to reinstall, consider rebooting to ensure a clean network state."
+
+- name: Post-uninstall health check (expect failures if fully removed)
+  ansible.builtin.command: kubectl get nodes
+  register: post_check
+  ignore_errors: true
+  changed_when: false
+
+- name: Report post-uninstall kubectl status
+  ansible.builtin.debug:
+    msg: >-
+      kubectl availability after uninstall: {{ 'still present (unexpected)' if post_check.rc == 0 else 'removed as expected' }}
+

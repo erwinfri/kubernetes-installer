@@ -1,0 +1,22 @@
+# MSSQL Server Custom Resource
+apiVersion: infra.example.com/v1
+kind: MSSQLServer
+metadata:
+  name: win2025-mssql
+  namespace: default
+spec:
+  targetVM:
+    vmName: "win2025server"
+    namespace: "default"
+  version: "2025"
+  installerPath: "./MS_SQL_2025.exe"
+  installPath: "C:\\Data"
+  acceptLicense: true
+  quietInstall: true
+  credentials:
+    adminUser: "Administrator"
+    adminPasswordVaultPath: "secret/data/windows-server-2025/admin"
+    saPasswordVaultPath: "secret/data/windows-server-2025/admin"
+  prerequisites:
+    validateWinRM: true
+    requireHTTPS: true

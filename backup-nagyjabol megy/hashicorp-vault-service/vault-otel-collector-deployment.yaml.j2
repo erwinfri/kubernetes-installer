@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-metrics
+  namespace: vault
+spec:
+  selector:
+    app.kubernetes.io/name: vault
+  ports:
+    - name: http-metrics
+      port: 8200
+      targetPort: 8200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+        - name: otel-collector
+          image: ubuntu:22.04
+          command: ["sh", "-c", "apt-get update && apt-get install -y curl iputils-ping dnsutils wget ca-certificates && wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.134.0/otelcol-contrib_0.134.0_linux_amd64.tar.gz && tar -xzf otelcol-contrib_0.134.0_linux_amd64.tar.gz && mv otelcol-contrib_0.134.0_linux_amd64/otelcol-contrib /usr/local/bin/ && chmod +x /usr/local/bin/otelcol-contrib && rm -rf otelcol-contrib_0.134.0_linux_amd64* && /usr/local/bin/otelcol-contrib --config=/etc/otel-collector-config.yaml"]
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "{{ otel_endpoint }}"
+            - name: OTEL_EXPORTER_OTLP_TOKEN
+              value: "{{ otel_token }}"
+          volumeMounts:
+            - name: otel-config
+              mountPath: /etc/otel-collector-config.yaml
+              subPath: otel-collector-config.yaml
+      volumes:
+        - name: otel-config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: vault
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'vault'
+              metrics_path: /v1/sys/metrics
+              params:
+                format: [prometheus]
+              static_configs:
+                - targets: ['vault-metrics.vault.svc.cluster.local:8200']
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  regex: 'vault_.*'
+                  action: keep
+    exporters:
+      otlphttp:
+        endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+        headers:
+          Authorization: "Bearer ${OTEL_EXPORTER_OTLP_TOKEN}"
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        metrics:
+          receivers: [prometheus]
+          exporters: [otlphttp]

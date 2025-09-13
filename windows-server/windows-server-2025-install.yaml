@@ -1,3 +1,8 @@
+- name: Set kubevirt_namespace default if not provided (for VM deployment)
+  ansible.builtin.set_fact:
+    kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
+    kubevirt_operator_namespace: "kubevirt"
+  tags: always
 
 - name: Set vm_name from vmName if provided, else default to win2025server
   ansible.builtin.set_fact:
@@ -166,19 +171,19 @@
           - "Size: {{ (vhdx_file_final_check.stat.size / 1024 / 1024 / 1024) | round(2) }} GB"
           - "{{ 'Downloaded from Microsoft' if (vhdx_download_result is defined and vhdx_download_result.changed | default(false)) else 'Using existing local file' }}"
 
-    - name: Ensure KubeVirt namespace exists
+    - name: Ensure VM target namespace exists
       kubernetes.core.k8s:
         api_version: v1
         kind: Namespace
         name: "{{ kubevirt_namespace }}"
         state: present
 
-    - name: Check if KubeVirt is deployed and ready
+    - name: Check if KubeVirt operator is deployed and ready (always in kubevirt namespace)
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: KubeVirt
         name: kubevirt
-        namespace: "{{ kubevirt_namespace }}"
+        namespace: "{{ kubevirt_operator_namespace }}"
       register: kubevirt_status
       failed_when:
         - kubevirt_status.resources | length == 0 or
@@ -745,21 +750,24 @@
       register: node_hostname
       changed_when: false
 
-    - name: Set PV resources for loop
+    - name: Set PV resources for loop (use VM namespace)
       ansible.builtin.set_fact:
         pv_resources:
           - name: "{{ vm_name }}-installer-pv"
             size: "{{ installer_disk_size | default('15Gi') }}"
             access_modes: ["ReadWriteOnce"]
             path: "{{ vm_name }}-installer"
+            claim_namespace: "{{ kubevirt_namespace }}"
           - name: "{{ vm_name }}-system-pv"
             size: "{{ system_disk_size | default('64Gi') }}"
             access_modes: ["ReadWriteOnce"]
             path: "{{ vm_name }}-system-disk"
+            claim_namespace: "{{ kubevirt_namespace }}"
           - name: "{{ vm_name }}-virtio-iso-pv"
             size: "{{ virtio_iso_size | default('1Gi') }}"
             access_modes: ["ReadOnlyMany"]
             path: "{{ vm_name }}-virtio-iso"
+            claim_namespace: "{{ kubevirt_namespace }}"
 
     - name: Create PersistentVolumes
       kubernetes.core.k8s:
@@ -791,20 +799,23 @@
                     values: ["{{ node_hostname.stdout }}"]
       loop: "{{ pv_resources }}"
 
-    - name: Set PVC resources for loop
+    - name: Set PVC resources for loop (use VM namespace)
       ansible.builtin.set_fact:
         pvc_resources:
           - name: "{{ vm_name }}-installer-pvc"
             size: "{{ installer_disk_size | default('15Gi') }}"
             access_modes: ["ReadWriteOnce"]
+            namespace: "{{ kubevirt_namespace }}"
           - name: "{{ vm_name }}-system-pvc"
             size: "{{ system_disk_size | default('64Gi') }}"
             access_modes: ["ReadWriteOnce"]
+            namespace: "{{ kubevirt_namespace }}"
           - name: "{{ vm_name }}-virtio-iso-pvc"
             size: "{{ virtio_iso_size | default('1Gi') }}"
             access_modes: ["ReadOnlyMany"]
+            namespace: "{{ kubevirt_namespace }}"
 
-    - name: Create PersistentVolumeClaims
+    - name: Create PersistentVolumeClaims (use VM namespace)
       kubernetes.core.k8s:
         state: present
         definition:
@@ -812,7 +823,7 @@
           kind: PersistentVolumeClaim
           metadata:
             name: "{{ item.name }}"
-            namespace: "{{ kubevirt_namespace }}"
+            namespace: "{{ item.namespace }}"
           spec:
             accessModes: "{{ item.access_modes }}"
             resources:

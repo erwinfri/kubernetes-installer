@@ -1,0 +1,24 @@
+# HashiCorp Vault Service Controller
+# Use this playbook to install, uninstall, or check status of Vault via Helm
+
+- hosts: localhost
+  gather_facts: false
+  vars:
+    action: install  # set to 'install', 'uninstall', or 'status'
+    vault_namespace: "default"
+  tasks:
+    - name: Include install tasks
+      include_tasks: hashicorp-vault-service/hashicorp-vault-service-install.yaml
+      when: action == 'install'
+
+    - name: Include uninstall tasks
+      include_tasks: hashicorp-vault-service/hashicorp-vault-service-uninstall.yaml
+      when: action == 'uninstall'
+
+    - name: Include status tasks
+      include_tasks: hashicorp-vault-service/hashicorp-vault-service-status.yaml
+      when: action == 'status'
+
+    - name: Include OTel sidecar tasks
+      include_tasks: hashicorp-vault-service/hashicorp-vault-service-otel.yaml
+      when: action == 'otel'

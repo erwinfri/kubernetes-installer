@@ -1,0 +1,102 @@
+---
+# Kubernetes storage cleanup for Windows Server artifacts
+# Deletes non-Bound PVCs in kubevirt namespace and non-Bound PVs
+# related to this solution (by name prefix or hostPath under storage_dir).
+- name: Kubernetes storage cleanup (win2019server)
+  hosts: localhost
+  become: yes
+  vars:
+    kubevirt_namespace: kubevirt
+    storage_dir: "/var/lib/kubevirt"
+    vm_name: "win2019server"
+  tasks:
+    - name: Show pre-clean status
+      block:
+        - name: List PVCs in kubevirt
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ kubevirt_namespace }}"
+          register: pvc_list
+        - name: List PVs
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolume
+          register: pv_list
+        - name: Display pre-clean summary
+          ansible.builtin.debug:
+            msg:
+              - "PVCs (kubevirt) total: {{ pvc_list.resources | length }}"
+              - "PVs (cluster) total: {{ pv_list.resources | length }}"
+
+    - name: Build orphan PVC list (kubevirt)
+      ansible.builtin.set_fact:
+        orphan_pvcs: |
+          {{ pvc_list.resources
+             | selectattr('metadata.name', 'search', '^' + vm_name + '-')
+             | rejectattr('status.phase', 'equalto', 'Bound')
+             | list }}
+
+    - name: Delete orphan PVCs in kubevirt
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ kubevirt_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      loop: "{{ orphan_pvcs }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: orphan_pvcs | length > 0
+
+    - name: Build orphan PV list (cluster)
+      ansible.builtin.set_fact:
+        orphan_pvs: |
+          {{ pv_list.resources
+             | selectattr('status.phase', 'ne', 'Bound')
+             | selectattr('metadata.name', 'search', '^' + vm_name + '-')
+             | list
+             +
+             (pv_list.resources
+               | selectattr('status.phase', 'ne', 'Bound')
+               | selectattr('spec.hostPath.path', 'defined')
+               | selectattr('spec.hostPath.path', 'search', '^' + storage_dir + '/')
+               | list) }}
+
+    - name: Unique orphan PV list
+      ansible.builtin.set_fact:
+        orphan_pvs: "{{ orphan_pvs | items2dict(key_name='metadata.name', value_name='self') | dict2items | map(attribute='value') | list }}"
+
+    - name: Delete orphan PVs (cluster-scoped)
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item.metadata.name }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      loop: "{{ orphan_pvs }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: orphan_pvs | length > 0
+
+    - name: Show post-clean status
+      block:
+        - name: List PVCs in kubevirt (after)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ kubevirt_namespace }}"
+          register: pvc_list_after
+        - name: List PVs (after)
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: PersistentVolume
+          register: pv_list_after
+        - name: Display post-clean summary
+          ansible.builtin.debug:
+            msg:
+              - "PVCs (kubevirt) remaining: {{ (pvc_list_after.resources | selectattr('metadata.name', 'search', '^' + vm_name + '-')) | list | length }}"
+              - "PVs (cluster) remaining: {{ (pv_list_after.resources | selectattr('metadata.name', 'search', '^' + vm_name + '-')) | list | length }}"

@@ -1,0 +1,31 @@
+---
+# Kubernetes Status Tasks (to be included by controller)
+# Assumes localhost context.
+
+- name: Check for kubectl binary
+  ansible.builtin.stat:
+    path: /usr/bin/kubectl
+  register: kubectl_bin
+
+- name: Show Kubernetes cluster status (if kubectl present)
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo '== Cluster Info ==' && kubectl cluster-info 2>&1 || true
+    echo '\n== Nodes ==' && kubectl get nodes -o wide 2>&1 || true
+    echo '\n== Pods (all namespaces) ==' && kubectl get pods --all-namespaces -o wide 2>&1 || true
+  args:
+    executable: /bin/bash
+  register: k8s_status
+  changed_when: false
+  when: kubectl_bin.stat.exists
+
+- name: Display Kubernetes status output
+  ansible.builtin.debug:
+    var: k8s_status.stdout_lines
+  when: kubectl_bin.stat.exists
+
+- name: Report when Kubernetes not installed
+  ansible.builtin.debug:
+    msg: "kubectl not found; Kubernetes appears uninstalled."
+  when: not kubectl_bin.stat.exists
+

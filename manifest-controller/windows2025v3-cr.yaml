@@ -1,0 +1,20 @@
+apiVersion: infra.example.com/v1
+kind: WindowsVM
+metadata:
+  name: windows2025v3
+  namespace: default
+spec:
+  action: install
+  vmName: windows2025v3
+  windows_version: "2025"
+  image: win2025server.vhdx
+  installer_disk_size: 15Gi
+  kubevirt_namespace: default
+  storage_dir: /data/vms
+  system_disk_size: 40Gi
+  vhdx_path: /data/vms/win2025server.vhdx
+  virtio_iso_size: 500Mi
+  vm_cpu_cores: 4
+  vm_memory: 8Gi
+  windows_admin_password: "Secret123%%"
+  windows_product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"

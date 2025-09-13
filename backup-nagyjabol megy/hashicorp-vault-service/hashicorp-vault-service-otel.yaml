@@ -1,0 +1,23 @@
+
+
+# Deploy a dedicated OTel Collector Deployment and Service for Vault metrics
+- name: Template OTel Collector manifest with parameters
+  ansible.builtin.template:
+    src: vault-otel-collector-deployment.yaml.j2
+    dest: /tmp/vault-otel-collector-deployment.yaml
+    mode: '0644'
+  vars:
+    otel_token: "{{ otel_token }}"
+    otel_endpoint: "{{ otel_endpoint }}"
+
+- name: Apply OTel Collector Deployment and Service
+  kubernetes.core.k8s:
+    state: present
+    src: /tmp/vault-otel-collector-deployment.yaml
+
+- name: Force rollout restart of OTel Collector deployment (ensure new config is used)
+  ansible.builtin.shell: |
+    kubectl -n vault rollout restart deployment otel-collector
+  register: otel_rollout_restart
+  changed_when: false
+  ignore_errors: true
