@@ -71,7 +71,7 @@ class WindowsServicesTUI:
     
 
     def apply_crds_menu(self, button):
-        """Show a menu to apply CRD YAMLs from manifest-controller."""
+        """Show a menu to apply CRD YAMLs from manifest-controller, with ESC support."""
         import os
         folder = '/root/kubernetes-installer/manifest-controller'
         files = os.listdir(folder)
@@ -89,10 +89,31 @@ class WindowsServicesTUI:
                 if 'no objects passed to apply' in result.stderr:
                     self.add_log_line(f"⚠️ The file {crd_name} does not contain a valid Kubernetes object. Please check the YAML content.")
 
+        # Custom button class for ESC handling
+        class CRDButton(urwid.Button):
+            def __init__(self, label, crd_name, crd_path, callback, tui_instance):
+                super().__init__(label)
+                self.crd_name = crd_name
+                self.crd_path = crd_path
+                self.callback = callback
+                self.tui = tui_instance
+            def keypress(self, size, key):
+                if key in ('enter', ' '):
+                    self.tui.close_popup()
+                    self.callback(self.crd_name, self.crd_path)
+                    return
+                if key == 'esc' or key == 'escape':
+                    self.tui.close_popup()
+                    self.tui.menu_state = None
+                    self.tui.popup_listbox = None
+                    self.tui.reset_menu_state()
+                    return
+                return super().keypress(size, key)
+
         menu_items = []
         for crd_file in crd_files:
             crd_path = os.path.join(folder, crd_file)
-            btn = urwid.Button(f"CRD: {crd_file}", on_press=lambda button, f=crd_file, p=crd_path: (self.close_popup(), handle_crd_apply_selection(f, p)))
+            btn = CRDButton(f"CRD: {crd_file}", crd_file, crd_path, handle_crd_apply_selection, self)
             menu_items.append(urwid.AttrMap(btn, 'button', 'button_focus'))
 
         walker = urwid.SimpleFocusListWalker(menu_items)
@@ -609,6 +630,9 @@ class WindowsServicesTUI:
         # Use standard ListBox - urwid will handle Enter key properly
         menu_walker = urwid.SimpleListWalker(menu_items)
         menu_listbox = urwid.ListBox(menu_walker)
+        # Ensure focus is set to the first item so Enter works
+        if len(menu_walker) > 0:
+            menu_listbox.focus_position = 0
         
         # Create simple popup content
         popup_content = urwid.Pile([
@@ -1274,6 +1298,7 @@ class WindowsServicesTUI:
                     else:
                         self.add_log_line(f"❌ Failed to delete CR {cr_name}: {err}")
             def popup_callback(cr_name, cr_path, status=None):
+                self.close_popup()
                 handle_cr_delete_selection(cr_name, cr_path, status)
             cr_options_for_popup = [(name, path, status) for (name, path, status) in cr_options]
             self.show_cr_selection_popup(
