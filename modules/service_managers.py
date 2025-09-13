@@ -103,7 +103,8 @@ class ServiceManager:
             namespaces = set()
             if os.path.exists(self.manifest_dir):
                 for file in os.listdir(self.manifest_dir):
-                    if file.endswith('-cr.yaml') or file.endswith('cr.yaml'):
+                    # Consider any YAML that is not clearly a CRD; verify by kind below
+                    if file.endswith('.yaml') and 'crd' not in file.lower():
                         file_path = os.path.join(self.manifest_dir, file)
                         try:
                             with open(file_path, 'r') as f:
@@ -140,85 +141,83 @@ class ServiceManager:
             # Always include 'default' namespace in the set to ensure VMs/CRs in default are shown
             namespaces.add('default')
 
-            # 2. Get deployed CRs from all relevant namespaces
+            # 2. Get deployed CRs from all namespaces (cluster-wide)
             try:
                 k8s_api = get_k8s_client()
-                for ns in namespaces:
-                    deployed_crs = k8s_api.list_namespaced_custom_object(
-                        group=resource_def['group'],
-                        version=resource_def['version'],
-                        namespace=ns,
-                        plural=resource_def['plural']
-                    )
-                    for cr in deployed_crs.get('items', []):
-                        name = cr['metadata']['name']
-                        deployed_cr_data = {
-                            'full_cr': cr,
-                            'namespace': ns,
-                            'status': cr.get('status', {})
-                        }
-                        if service_type == 'windowsvm':
-                            deployed_cr_data.update({
-                                'vm_name': cr['spec'].get('vmName', name),
-                                'action': cr['spec'].get('action', 'unknown')
-                            })
-                        elif service_type == 'mssqlserver':
-                            deployed_cr_data.update({
-                                'target_vm': cr['spec']['targetVM']['vmName'],
-                                'version': cr['spec'].get('version', 'unknown'),
-                                'enabled': cr['spec'].get('enabled', True)
-                            })
-                        elif service_type == 'otelcollector':
-                            deployed_cr_data.update({
-                                'target_vm': cr['spec']['targetVM']['vmName'],
-                                'metrics_type': cr['spec'].get('metricsType', 'unknown'),
-                                'enabled': cr['spec'].get('enabled', True)
-                            })
-                        status_report[resource_def['plural']]['deployed_crs'][name] = deployed_cr_data
+                deployed_crs = k8s_api.list_cluster_custom_object(
+                    group=resource_def['group'],
+                    version=resource_def['version'],
+                    plural=resource_def['plural']
+                )
+                for cr in deployed_crs.get('items', []):
+                    name = cr['metadata']['name']
+                    ns = cr['metadata'].get('namespace', 'default')
+                    deployed_cr_data = {
+                        'full_cr': cr,
+                        'namespace': ns,
+                        'status': cr.get('status', {})
+                    }
+                    if service_type == 'windowsvm':
+                        deployed_cr_data.update({
+                            'vm_name': cr['spec'].get('vmName', name),
+                            'action': cr['spec'].get('action', 'unknown')
+                        })
+                    elif service_type == 'mssqlserver':
+                        deployed_cr_data.update({
+                            'target_vm': cr['spec']['targetVM']['vmName'],
+                            'version': cr['spec'].get('version', 'unknown'),
+                            'enabled': cr['spec'].get('enabled', True)
+                        })
+                    elif service_type == 'otelcollector':
+                        deployed_cr_data.update({
+                            'target_vm': cr['spec']['targetVM']['vmName'],
+                            'metrics_type': cr['spec'].get('metricsType', 'unknown'),
+                            'enabled': cr['spec'].get('enabled', True)
+                        })
+                    status_report[resource_def['plural']]['deployed_crs'][name] = deployed_cr_data
             except Exception as e:
                 logger.warning(f"Failed to get deployed {service_type} CRs: {e}")
 
             # 3. Get running VMs (only for windowsvm type, all namespaces)
             if service_type == 'windowsvm':
-                self._get_running_vms_status(status_report, namespaces)
+                self._get_running_vms_status(status_report)
         except Exception as e:
             logger.error(f"Error getting {service_type} status: {e}")
     
-    def _get_running_vms_status(self, status_report, namespaces):
-        """Get status of running VMs from KubeVirt in all relevant namespaces"""
+    def _get_running_vms_status(self, status_report, namespaces=None):
+        """Get status of running VMs from KubeVirt across all namespaces"""
         try:
             k8s_api = get_k8s_client()
-            for ns in namespaces:
-                vms = k8s_api.list_namespaced_custom_object(
-                    group="kubevirt.io",
-                    version="v1",
-                    namespace=ns,
-                    plural="virtualmachines"
-                )
-                for vm in vms.get('items', []):
-                    name = vm['metadata']['name']
-                    vm_status = vm.get('status', {})
-                    status_report['windowsvms']['running_vms'][name] = {
-                        'namespace': ns,
-                        'ready': vm_status.get('ready', False),
-                        'created': vm_status.get('created', False),
-                        'printable_status': vm_status.get('printableStatus', 'Unknown'),
-                        'conditions': vm_status.get('conditions', [])
-                    }
-                    # Get VMI status if exists
-                    try:
-                        vmi = k8s_api.get_namespaced_custom_object(
-                            group="kubevirt.io",
-                            version="v1",
-                            namespace=ns,
-                            plural="virtualmachineinstances",
-                            name=name
-                        )
-                        status_report['windowsvms']['running_vms'][name]['vmi_phase'] = vmi.get('status', {}).get('phase', 'Unknown')
-                        status_report['windowsvms']['running_vms'][name]['vmi_ready'] = vmi.get('status', {}).get('ready', False)
-                    except:
-                        status_report['windowsvms']['running_vms'][name]['vmi_phase'] = 'NotCreated'
-                        status_report['windowsvms']['running_vms'][name]['vmi_ready'] = False
+            vms = k8s_api.list_cluster_custom_object(
+                group="kubevirt.io",
+                version="v1",
+                plural="virtualmachines"
+            )
+            for vm in vms.get('items', []):
+                name = vm['metadata']['name']
+                ns = vm['metadata'].get('namespace', 'default')
+                vm_status = vm.get('status', {})
+                status_report['windowsvms']['running_vms'][name] = {
+                    'namespace': ns,
+                    'ready': vm_status.get('ready', False),
+                    'created': vm_status.get('created', False),
+                    'printable_status': vm_status.get('printableStatus', 'Unknown'),
+                    'conditions': vm_status.get('conditions', [])
+                }
+                # Get VMI status if exists
+                try:
+                    vmi = k8s_api.get_namespaced_custom_object(
+                        group="kubevirt.io",
+                        version="v1",
+                        namespace=ns,
+                        plural="virtualmachineinstances",
+                        name=name
+                    )
+                    status_report['windowsvms']['running_vms'][name]['vmi_phase'] = vmi.get('status', {}).get('phase', 'Unknown')
+                    status_report['windowsvms']['running_vms'][name]['vmi_ready'] = vmi.get('status', {}).get('ready', False)
+                except Exception:
+                    status_report['windowsvms']['running_vms'][name]['vmi_phase'] = 'NotCreated'
+                    status_report['windowsvms']['running_vms'][name]['vmi_ready'] = False
         except Exception as e:
             logger.warning(f"Failed to get running VMs: {e}")
     
@@ -291,18 +290,23 @@ class ServiceManager:
     def _generate_summary(self, status_report):
         """Generate summary statistics"""
         summary = {}
-        
-        for service_type in self.resource_types.keys():
-            if service_type in status_report:
-                service_data = status_report[service_type]
-                summary[service_type] = {
-                    'local_count': len(service_data.get('local_crs', {})),
-                    'deployed_count': len(service_data.get('deployed_crs', {}))
-                }
-                
-                if service_type == 'windowsvm':
-                    summary[service_type]['running_count'] = len(service_data.get('running_vms', {}))
-        
+
+        # Map singular keys (used by TUI) to plural buckets in status_report
+        mapping = {
+            'windowsvm': 'windowsvms',
+            'mssqlserver': 'mssqlservers',
+            'otelcollector': 'otelcollectors',
+        }
+
+        for singular, plural in mapping.items():
+            service_data = status_report.get(plural, {})
+            summary[singular] = {
+                'local_count': len(service_data.get('local_crs', {})),
+                'deployed_count': len(service_data.get('deployed_crs', {}))
+            }
+            if singular == 'windowsvm':
+                summary[singular]['running_count'] = len(service_data.get('running_vms', {}))
+
         status_report['summary'] = summary
     
     def get_local_crs_by_type(self, service_type):
@@ -314,7 +318,7 @@ class ServiceManager:
         local_crs = []
         if os.path.exists(self.manifest_dir):
             for file in os.listdir(self.manifest_dir):
-                if file.endswith('-cr.yaml') or file.endswith('cr.yaml'):
+                if file.endswith('.yaml') and 'crd' not in file.lower():
                     file_path = os.path.join(self.manifest_dir, file)
                     try:
                         with open(file_path, 'r') as f:
