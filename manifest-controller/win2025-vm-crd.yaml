@@ -64,5 +64,37 @@ spec:
                   type: string
                 windows_product_key:
                   type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current phase of the Windows VM operation
+                message:
+                  type: string
+                  description: Human-readable status message
+                reason:
+                  type: string
+                  description: Short reason code for current phase
+                observedGeneration:
+                  type: integer
+                  description: Last observed generation of this resource by the operator
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
       subresources:
         status: {}
