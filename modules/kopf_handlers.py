@@ -279,6 +279,25 @@ def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
     patch.status['reason'] = 'DeleteRequested'
     patch.status['observedGeneration'] = meta.get('generation')
 
+    # Run uninstall playbook
+    playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
+    logger.info(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
+    if log_queue:
+        log_queue.put(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
+    result = run_ansible_playbook(playbook_path, {
+        'action': 'uninstall',
+        'vm_name': vm_name,
+        'kubevirt_namespace': namespace
+    })
+    if result['success']:
+        logger.info(f"[OPERATOR] Uninstall playbook completed for VM {vm_name}")
+        if log_queue:
+            log_queue.put(f"[OPERATOR] Uninstall playbook completed for VM {vm_name}")
+    else:
+        logger.error(f"[OPERATOR] Uninstall playbook failed for VM {vm_name}: {result.get('error')}")
+        if log_queue:
+            log_queue.put(f"[OPERATOR] Uninstall playbook failed for VM {vm_name}: {result.get('error')}")
+
 # MSSQLServer Handlers
 @kopf.on.create('infra.example.com', 'v1', 'mssqlservers')
 @kopf.on.update('infra.example.com', 'v1', 'mssqlservers')
@@ -412,14 +431,17 @@ def run_ansible_playbook(playbook_path, variables):
         playbook_completed = False
         for line in process.stdout:
             line = line.rstrip()
+            logger.info(f"[PLAYBOOK] {line}")  # Stream to console in real time
             if log_queue:
                 log_queue.put(f"[PLAYBOOK] {line}")
             output_lines.append(line)
             # Detect playbook completion by looking for the final task and PLAY RECAP
             if 'TASK [Display completion message]' in line or 'PLAY RECAP' in line:
                 playbook_completed = True
-                if 'PLAY RECAP' in line and log_queue:
-                    log_queue.put("[PLAYBOOK] --- End of playbook execution detected ---")
+                if 'PLAY RECAP' in line:
+                    logger.info("[PLAYBOOK] --- End of playbook execution detected ---")
+                    if log_queue:
+                        log_queue.put("[PLAYBOOK] --- End of playbook execution detected ---")
         if playbook_completed and log_queue:
             log_queue.put("[PLAYBOOK] Playbook execution has completed. Check above for summary.")
         process.wait()
