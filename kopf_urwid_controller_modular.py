@@ -30,6 +30,9 @@ def run_kopf_operator():
     """Run the Kopf operator in a separate thread"""
     try:
         load_kube_config()
+        # --- External variable parsing and override logic ---
+        from modules.utils.var_helpers import get_var, EXTRA_VARS
+
         logger = logging.getLogger(__name__)
         logger.info("[OPERATOR] Starting Kopf operator thread...")
         print("[OPERATOR] Kopf operator thread starting...")
@@ -90,8 +93,10 @@ def main():
             run_kopf_operator()
             return
 
+
         # Start operator in background thread
         run_kopf_operator_thread()
+
 
         # Create TUI application
         tui_app = WindowsServicesTUI(service_manager)

@@ -6,7 +6,6 @@
   gather_facts: false
   vars:
     vm_name: "{{ vm_name | default('win2025server') }}"
-    kubevirt_namespace: "kubevirt"
     windows_vm_ip: ""
     otel: false
     otel_config: ""  # Can be 'os', 'mssql', 'os,mssql', or ''
@@ -14,6 +13,18 @@
     otel_endpoint: ""
 
   pre_tasks:
+    - name: Set kubevirt_namespace default if not provided
+      ansible.builtin.set_fact:
+        kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
+    # Ensure non-root user for browser automation
+    - name: Ensure 'seleniumuser' user exists for browser automation
+      ansible.builtin.user:
+        name: seleniumuser
+        state: present
+        shell: /bin/bash
+        create_home: yes
+      become: true
+      tags: seleniumuser
     # Ensure port-forward script exists and is executable (must be before Vault usage)
     - name: Ensure port-forward script exists and is executable
       ansible.builtin.stat:
@@ -836,3 +847,7 @@
           - "🔧 Manual access options:"
           - "  VNC: kubectl port-forward -n {{ kubevirt_namespace }} service/{{ vm_name }}-vnc 5900:5900"
           - "  RDP: kubectl port-forward -n {{ kubevirt_namespace }} service/{{ vm_name }}-rdp 3389:3389"
+          - ""
+          - "🗄️  MSSQL Connection Test (from CMD):"
+          - "  sqlcmd -S localhost -E -C"
+          - "  sqlcmd -S localhost -U sa -P YourPassword -C"

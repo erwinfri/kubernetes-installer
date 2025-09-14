@@ -1,3 +1,4 @@
+from modules.utils.var_helpers import get_var
 
 
 # Global log queue for TUI (import from canonical source)
@@ -97,13 +98,13 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
         return
     log_event("[OPERATOR] handle_windowsvm triggered!")
     name = meta.get('name')
-    action = spec.get('action', 'install')
+    action = get_var('action', spec, 'install')
     # Always log and run uninstall if action changed to uninstall
     if diff:
         for d in diff:
             if d[1] == ('spec', 'action'):
                 log_event(f"[OPERATOR] Detected spec.action change: {d}")
-    vm_name = spec.get('vmName', name)
+    vm_name = get_var('vmName', spec, name)
     log_event(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
     # Mark as InProgress at the beginning of processing
     try:
@@ -135,19 +136,19 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
         playbook_vars = {
             'action': action,
             'vm_name': vm_name,
-            'windows_version': spec.get('windows_version', '2025'),
-            'kubevirt_namespace': spec.get('kubevirt_namespace', namespace),
-            'storage_dir': spec.get('storage_dir', '/var/lib/kubevirt'),
-            'system_disk_size': spec.get('system_disk_size', '40Gi'),
-            'vhdx_path': spec.get('vhdx_path', '/data/vms/win2025server.vhdx'),
-            'virtio_iso_size': spec.get('virtio_iso_size', '500Mi'),
-            'vm_cpu_cores': spec.get('vm_cpu_cores', 4),
-            'vm_memory': spec.get('vm_memory', '8Gi'),
-            'windows_admin_password': spec.get('windows_admin_password', 'Secret123%%'),
-            'windows_product_key': spec.get('windows_product_key', ''),
-            'image': spec.get('image', 'win2025server.vhdx'),
-            'installer_disk_size': spec.get('installer_disk_size', '15Gi'),
-            'vault_secret': spec.get('vault_secret', 'secret/data/windows-server-2025/admin'),
+            'windows_version': get_var('windows_version', spec, '2025'),
+            'kubevirt_namespace': get_var('kubevirt_namespace', spec, namespace),
+            'storage_dir': get_var('storage_dir', spec, '/var/lib/kubevirt'),
+            'system_disk_size': get_var('system_disk_size', spec, '40Gi'),
+            'vhdx_path': get_var('vhdx_path', spec, '/data/vms/win2025server.vhdx'),
+            'virtio_iso_size': get_var('virtio_iso_size', spec, '500Mi'),
+            'vm_cpu_cores': get_var('vm_cpu_cores', spec, 4),
+            'vm_memory': get_var('vm_memory', spec, '8Gi'),
+            'windows_admin_password': get_var('windows_admin_password', spec, 'Secret123%%'),
+            'windows_product_key': get_var('windows_product_key', spec, ''),
+            'image': get_var('image', spec, 'win2025server.vhdx'),
+            'installer_disk_size': get_var('installer_disk_size', spec, '15Gi'),
+            'vault_secret': get_var('vault_secret', spec, 'secret/data/windows-server-2025/admin'),
         }
         if action == 'install':
             log_event(f"[OPERATOR] Running Ansible playbook for install on VM {vm_name}")
@@ -212,8 +213,8 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
 @kopf.on.resume('infra.example.com', 'v1', 'windowsvms')
 def resume_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
     name = meta.get('name')
-    vm_name = spec.get('vmName', name)
-    vm_ns = spec.get('kubevirt_namespace', namespace)
+    vm_name = get_var('vmName', spec, name)
+    vm_ns = get_var('kubevirt_namespace', spec, namespace)
     try:
         st = check_target_vm_status(vm_name, vm_ns)
         now = datetime.utcnow().isoformat() + 'Z'
@@ -248,7 +249,7 @@ def resume_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
 @kopf.on.delete('infra.example.com', 'v1', 'windowsvms')
 def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
     name = meta.get('name')
-    vm_name = spec.get('vmName', name)
+    vm_name = get_var('vmName', spec, name)
     patch.status['phase'] = 'Terminating'
     patch.status['message'] = f"Delete requested for VM {vm_name}"
     patch.status['reason'] = 'DeleteRequested'
@@ -273,8 +274,8 @@ def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
 def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
     """Handle MSSQLServer resource changes"""
     name = meta.get('name')
-    target_vm = spec['targetVM']['vmName']
-    enabled = spec.get('enabled', True)
+    target_vm = get_var('vmName', spec['targetVM'])
+    enabled = get_var('enabled', spec, True)
     msg = f"Processing MSSQLServer {name}: target_vm={target_vm}, enabled={enabled}"
     log_event(msg)
     try:
@@ -283,8 +284,8 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
         if not enabled:
             log_event(f"MSSQLServer {name} is disabled, skipping playbook run.")
             return
-        # Use the namespace from the CR spec or fallback to the resource namespace
-        vm_ns = spec['targetVM'].get('namespace', namespace)
+        # Use kubevirt_namespace from spec.targetVM or spec, fallback to resource namespace
+        vm_ns = spec['targetVM'].get('kubevirt_namespace') or spec.get('kubevirt_namespace') or namespace
         vm_status = check_target_vm_status(target_vm, vm_ns)
         if not vm_status['ready']:
             log_event(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
@@ -299,6 +300,7 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
             'otel_config': '',
             'otel_token': '',
             'otel_endpoint': '',
+            'install': 'mssql',  # Main invoking action for MSSQL install
         }
         # Add MSSQL-specific vars from spec if present
         if 'credentials' in spec:
@@ -315,6 +317,7 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
             playbook_vars['acceptLicense'] = spec['acceptLicense']
         if 'quietInstall' in spec:
             playbook_vars['quietInstall'] = spec['quietInstall']
+        #log_event(f"[DEBUG] playbook_vars for MSSQLServer: {playbook_vars}")
         result = run_ansible_playbook(playbook_path, playbook_vars, stream_to_tui=True)
         if result['success']:
             log_event(f"Operator: Successfully installed MSSQL on VM {target_vm}")
@@ -340,9 +343,9 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
 def handle_windowsotelcollector(body, meta, spec, status, namespace, **kwargs):
     """Handle OTelCollector resource changes"""
     name = meta.get('name')
-    target_vm = spec['targetVM']['vmName']
-    enabled = spec.get('enabled', True)
-    metrics_type = spec.get('metricsType', 'os')
+    target_vm = get_var('vmName', spec['targetVM'])
+    enabled = get_var('enabled', spec, True)
+    metrics_type = get_var('metricsType', spec, 'os')
     msg = f"Processing OTelCollector {name}: target_vm={target_vm}, metrics_type={metrics_type}, enabled={enabled}"
     log_event(msg)
     try:

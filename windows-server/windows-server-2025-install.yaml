@@ -1103,7 +1103,23 @@
               - "  Node: {{ vmi_status.resources[0].status.nodeName | default('Not assigned') }}"
               - "  IP: {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('Not assigned') }}"
 
-# ...existing code continues as a flat list of tasks...
+
+# Filter and check WinRM services for the current VM only
+- name: Check WinRM and related services for this VM only
+  ansible.builtin.shell: |
+    echo "Checking for WinRM HTTPS service for VM: {{ vm_name }}..."
+    kubectl get svc -n {{ kubevirt_namespace }} | grep "^${VM_NAME}-" || true
+    # Check for winrm-https service
+    if kubectl get svc -n {{ kubevirt_namespace }} | grep -q "^${VM_NAME}-winrm-https"; then
+      echo "winrm-https service found for ${VM_NAME}"
+    else
+      echo "https_service_not_found"
+    fi
+  environment:
+    VM_NAME: "{{ vm_name }}"
+  register: winrm_service_check_filtered
+  changed_when: false
+  tags: always
 
 # === Useful Access and Retrieval Commands ===
 - name: Display useful access and retrieval commands
