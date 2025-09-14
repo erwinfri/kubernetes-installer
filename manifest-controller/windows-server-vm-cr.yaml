@@ -1,11 +1,11 @@
 apiVersion: infra.example.com/v1
 kind: WindowsVM
 metadata:
-  name: windows2025v3
+  name: windows2025
   namespace: default
 spec:
   action: install
-  vmName: windows2025v3
+  vmName: windows2025
   windows_version: "2025"
   image: win2025server.vhdx
   installer_disk_size: 15Gi
@@ -18,3 +18,4 @@ spec:
   vm_memory: 8Gi
   windows_admin_password: "Secret123%%"
   windows_product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+  vault_secret: "secret/data/windows-server-2025/admin"

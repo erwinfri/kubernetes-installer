@@ -64,6 +64,9 @@ spec:
                   type: string
                 windows_product_key:
                   type: string
+                vault_secret:
+                  type: string
+                  description: Vault secret path for admin password 
             status:
               type: object
               properties:

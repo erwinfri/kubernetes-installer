@@ -93,12 +93,19 @@
   failed_when: false
   tags: always
 
+- name: Print admin password and vault secret before Vault policy
+  ansible.builtin.debug:
+    msg:
+      - "windows_admin_password={{ windows_admin_password | default('UNDEFINED') }}"
+      - "windows_vault_secret={{ windows_vault_secret | default('UNDEFINED') }}"
+  tags: always
+
 # Create Vault policy file for Windows Server 2025 admin secret (must come before any use)
 - name: Write Vault policy file for win2025-admin-policy
   ansible.builtin.copy:
     dest: /tmp/win2025-admin-policy.hcl
     content: |
-      path "secret/data/windows-server-2025/admin" {
+      path "{{ windows_vault_secret }}" {
         capabilities = ["create", "update", "read", "delete", "list"]
       }
   tags: always
@@ -130,14 +137,24 @@
   changed_when: false
   tags: always
 
+
 # Set Vault environment for admin token
 - name: Set Vault environment for admin token
   ansible.builtin.set_fact:
     win2025_vault_env:
       VAULT_ADDR: "http://localhost:8200"
-
       VAULT_TOKEN: "{{ win2025_admin_token.stdout }}"
     win2025_admin_token: "{{ win2025_admin_token.stdout }}"
+  tags: always
+
+# Write the admin password to Vault at the specified path
+- name: Write admin password to Vault
+  ansible.builtin.shell: |
+    vault kv put {{ windows_vault_secret }} password='{{ windows_admin_password }}'
+  environment: "{{ win2025_vault_env }}"
+  register: vault_write_password_result
+  changed_when: "'Success! Data written' in vault_write_password_result.stdout or vault_write_password_result.rc == 0"
+  failed_when: vault_write_password_result.rc != 0
   tags: always
 
   # ...existing code continues as a flat list of tasks...
@@ -1074,6 +1091,7 @@
           delay: 10
           
 
+
         - name: Display installation results
           ansible.builtin.debug:
             msg:
@@ -1084,35 +1102,44 @@
               - "  VMI Phase: {{ vmi_status.resources[0].status.phase | default('Pending') }}"
               - "  Node: {{ vmi_status.resources[0].status.nodeName | default('Not assigned') }}"
               - "  IP: {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('Not assigned') }}"
-              - ""
-              - "🔐 Access Information:"
-              - "  Administrator password is securely stored in HashiCorp Vault."
-              - "  Retrieve with:"
-              - "    vault kv get -field=password secret/windows-server-2025/admin"
-              - "  (Requires VAULT_ADDR and VAULT_TOKEN to be set)"
-              - ""
-              - "🖥️  VNC Access:"
-              - "  Direct: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
-              - "  Proxy: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }} --proxy-only --port 5900"
-              - "  NodePort: localhost:30001 (if NodePort allowed through firewall)"
-              - ""
-              - "�️  RDP Access (after Windows setup completes):"
-              - "  Method 1 - Port Forward: kubectl -n {{ kubevirt_namespace }} port-forward service/{{ vm_name }}-vnc 3389:3389"
-              - "  Method 2 - VM IP Direct: RDP to {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('VM_IP') }}:3389"
-              - "  Method 3 - virtctl: virtctl port-forward {{ vm_name }} -n {{ kubevirt_namespace }} 3389:3389"
-              - "  Then connect RDP client to: localhost:3389"
-              - ""
-              - "🛠️  Console Access:"
-              - "  Serial: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
-              - ""
-              - "�📁 Storage Configuration:"
-              - "  Installer VHDX: {{ storage_dir }}/win2025server-installer/disk.img (boot)"
-              - "  System Disk: {{ storage_dir }}/win2025server-system-disk/disk.img (blank {{ system_disk_size }})"
-              - "  VirtIO ISO: {{ storage_dir }}/win2025server-virtio-iso/disk.img"
-              - "  Sysprep: Secret win2025server-sysprep (Autounattend.xml)"
-              - ""
-              - "🛠 Next Steps:"
-              - "1. Use VNC to monitor Windows installation progress"
-              - "2. Installation proceeds automatically with unattend.xml"
-              - "3. After Windows setup completes, use RDP for remote access"
-              - "4. Login with Administrator (password from Vault)"
+
+# ...existing code continues as a flat list of tasks...
+
+# === Useful Access and Retrieval Commands ===
+- name: Display useful access and retrieval commands
+  ansible.builtin.debug:
+    msg:
+      - "\n\n==================== Useful Access & Retrieval Commands ===================="
+      - "Vault is initialized and unsealed (persistent mode, file storage)."
+      - "Root token is in /tmp/vault-init.json (key: .root_token)."
+      - "To port-forward for local access:"
+      - "  ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid"
+      - "Then set VAULT_ADDR and use the CLI:"
+      - "  export VAULT_ADDR=http://localhost:8200"
+      - "  vault status"
+      - "  vault login <root_token>"
+      - ""
+      - "🔐 Retrieve Administrator password from Vault:"
+      - "  vault kv get -field=password {{ windows_vault_secret }}"
+      - "  (Requires VAULT_ADDR and VAULT_TOKEN to be set)"
+      - ""
+      - "🖥️  VNC Access:"
+      - "  Direct: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }}"
+      - "  Proxy: virtctl vnc {{ vm_name }} -n {{ kubevirt_namespace }} --proxy-only --port 5900"
+      - "  NodePort: localhost:30001 (if NodePort allowed through firewall)"
+      - ""
+      - "🪟 RDP Access (after Windows setup completes):"
+      - "  Method 1 - Port Forward: kubectl -n {{ kubevirt_namespace }} port-forward service/{{ vm_name }}-vnc 3389:3389"
+      - "  Method 2 - VM IP Direct: RDP to {{ vmi_status.resources[0].status.interfaces[0].ipAddress | default('VM_IP') }}:3389"
+      - "  Method 3 - virtctl: virtctl port-forward {{ vm_name }} -n {{ kubevirt_namespace }} 3389:3389"
+      - "  Then connect RDP client to: localhost:3389"
+      - ""
+      - "🛠️  Console Access:"
+      - "  Serial: virtctl console {{ vm_name }} -n {{ kubevirt_namespace }}"
+      - ""
+      - "📁 Storage Configuration:"
+      - "  Installer VHDX: {{ storage_dir }}/win2025server-installer/disk.img (boot)"
+      - "  System Disk: {{ storage_dir }}/win2025server-system-disk/disk.img (blank {{ system_disk_size }})"
+      - "  VirtIO ISO: {{ storage_dir }}/win2025server-virtio-iso/disk.img"
+      - "  Sysprep: Secret win2025server-sysprep (Autounattend.xml)"
+      - "==========================================================================\n\n"

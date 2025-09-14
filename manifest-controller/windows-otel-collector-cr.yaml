@@ -1,6 +1,6 @@
 # OpenTelemetry Collector Custom Resource - Combined OS and MSSQL metrics
 apiVersion: infra.example.com/v1
-kind: OTelCollector
+kind: WindowsOTelCollector
 metadata:
   name: win2025-otel-collector
   namespace: default
