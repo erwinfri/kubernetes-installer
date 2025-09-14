@@ -12,15 +12,9 @@ from datetime import datetime
 import threading
 import os
 
-# Import from utils with fallback
-try:
-    from .utils.logging_config import log_queue
-except ImportError:
-    try:
-        from utils.logging_config import log_queue
-    except ImportError:
-        import queue as queue_module
-        log_queue = queue_module.Queue()
+
+# Import canonical log_queue (no fallback, must be shared)
+from modules.utils.logging_config import log_queue
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ metadata:
   namespace: default
 spec:
   targetVM:
-    vmName: "win2025server"
+    vmName: "windows2025"
     namespace: "default"
   version: "2025"
   installerPath: "./MS_SQL_2025.exe"

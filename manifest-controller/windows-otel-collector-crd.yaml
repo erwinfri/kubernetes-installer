@@ -1,7 +1,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: otelcollectors.infra.example.com
+  name: windowsotelcollectors.infra.example.com
 spec:
   group: infra.example.com
   versions:
@@ -78,7 +78,7 @@ spec:
                   serviceName:
                     type: string
                     description: "Windows service name"
-                    default: "otelcollector"
+                    default: "windowstelcollector"
                   startType:
                     type: string
                     description: "Service start type"
@@ -228,9 +228,9 @@ spec:
   
   scope: Namespaced
   names:
-    plural: otelcollectors
-    singular: otelcollector
-    kind: OTelCollector
-    shortNames:
-    - otel
-    - otlp
+  plural: windowsotelcollectors
+  singular: windowsotelcollector
+  kind: WindowsOTelCollector
+  shortNames:
+  - wotel
+  - wotlp

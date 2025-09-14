@@ -1,3 +1,17 @@
+
+
+# Global log queue for TUI (import from canonical source)
+from modules.utils.logging_config import log_queue
+
+import logging
+logger = logging.getLogger(__name__)
+
+# Unified logging helper for TUI and file logger
+def log_event(msg):
+    logger.info(msg)
+    if log_queue:
+        log_queue.put(msg)
+
 """
 Kopf handlers for Windows services management
 """
@@ -11,13 +25,9 @@ import yaml
 from datetime import datetime
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-import queue
 
-# Global log queue for TUI
-try:
-    from modules.tui_interface import log_queue
-except ImportError:
-    log_queue = None
+# Global log queue for TUI (import from canonical source)
+from modules.utils.logging_config import log_queue
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +58,16 @@ RESOURCES = {
         'version': 'v1',
         'plural': 'mssqlservers'
     },
-    'otelcollector': {
+    'windowsotelcollector': {
         'group': 'infra.example.com',
         'version': 'v1', 
-        'plural': 'otelcollectors'
+        'plural': 'windowsotelcollectors'
     }
 }
 
 def setup_kopf_handlers():
     """Set up all Kopf handlers for different resource types"""
-    logger.info("Setting up Kopf handlers for Windows services...")
+    log_event("Setting up Kopf handlers for Windows services...")
 
 
 # Configure Kopf persistence to reduce status conflicts
@@ -68,9 +78,9 @@ def configure_kopf(settings: kopf.OperatorSettings, **_):
         settings.persistence.progress_storage = kopf.AnnotationsProgressStorage(prefix='kopf.windowsvm.dev')
         settings.persistence.diffbase_storage = kopf.AnnotationsDiffBaseStorage(prefix='kopf.windowsvm.dev')
         # Keep posting/info defaults; adjust if you want quieter logs
-        logger.info("[OPERATOR] Kopf persistence configured to use annotations for progress/diffbase")
+        log_event("[OPERATOR] Kopf persistence configured to use annotations for progress/diffbase")
     except Exception as e:
-        logger.warning(f"[OPERATOR] Failed to configure Kopf persistence: {e}")
+        log_event(f"[OPERATOR] Failed to configure Kopf persistence: {e}")
 
 # WindowsVM Handlers
 @kopf.on.create('infra.example.com', 'v1', 'windowsvms')
@@ -80,29 +90,21 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
     terminal_phases = ['Ready', 'Failed', 'Skipped']
     if status and status.get('phase') in terminal_phases and status.get('observedGeneration') == meta.get('generation'):
         msg = f"[OPERATOR] Skipping execution for {meta.get('name')} (phase={status.get('phase')})"
-        logger.info(msg)
-        if log_queue:
-            log_queue.put(msg)
+        log_event(msg)
         patch.status['phase'] = status.get('phase')
         patch.status['message'] = status.get('message', '')
         patch.status['observedGeneration'] = status.get('observedGeneration')
         return
-    logger.info("[OPERATOR] handle_windowsvm triggered!")
-    if log_queue:
-        log_queue.put("[OPERATOR] handle_windowsvm triggered!")
+    log_event("[OPERATOR] handle_windowsvm triggered!")
     name = meta.get('name')
     action = spec.get('action', 'install')
     # Always log and run uninstall if action changed to uninstall
     if diff:
         for d in diff:
             if d[1] == ('spec', 'action'):
-                logger.info(f"[OPERATOR] Detected spec.action change: {d}")
-                if log_queue:
-                    log_queue.put(f"[OPERATOR] Detected spec.action change: {d}")
+                log_event(f"[OPERATOR] Detected spec.action change: {d}")
     vm_name = spec.get('vmName', name)
-    logger.info(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
-    if log_queue:
-        log_queue.put(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
+    log_event(f"[OPERATOR] CR received: name={name}, action={action}, vm_name={vm_name}")
     # Mark as InProgress at the beginning of processing
     try:
         patch.status['phase'] = 'InProgress'
@@ -125,13 +127,9 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
     max_retries = 5
     retry_delay = 1  # seconds
     try:
-        logger.info(f"[OPERATOR] Deciding what to do for action={action} on VM {vm_name}")
-        if log_queue:
-            log_queue.put(f"[OPERATOR] Deciding what to do for action={action} on VM {vm_name}")
+        log_event(f"[OPERATOR] Deciding what to do for action={action} on VM {vm_name}")
         kopf.info(body, reason='Processing', message=f'Starting {action} for VM {vm_name}')
-        logger.info(f"[OPERATOR] Starting {action} for VM {vm_name}")
-        if log_queue:
-            log_queue.put(f"[OPERATOR] Starting {action} for VM {vm_name}")
+        log_event(f"[OPERATOR] Starting {action} for VM {vm_name}")
         playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
         # Collect all relevant variables from spec for playbook
         playbook_vars = {
@@ -149,33 +147,21 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
             'windows_product_key': spec.get('windows_product_key', ''),
             'image': spec.get('image', 'win2025server.vhdx'),
             'installer_disk_size': spec.get('installer_disk_size', '15Gi'),
+            'vault_secret': spec.get('vault_secret', 'secret/data/windows-server-2025/admin'),
         }
         if action == 'install':
-            logger.info(f"[OPERATOR] Running Ansible playbook for install on VM {vm_name}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Running Ansible playbook for install on VM {vm_name}")
+            log_event(f"[OPERATOR] Running Ansible playbook for install on VM {vm_name}")
             result = run_ansible_playbook(playbook_path, playbook_vars)
         elif action == 'uninstall':
-            logger.info(f"[OPERATOR] Running Ansible playbook for uninstall on VM {vm_name}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Running Ansible playbook for uninstall on VM {vm_name}")
+            log_event(f"[OPERATOR] Running Ansible playbook for uninstall on VM {vm_name}")
             result = run_ansible_playbook(playbook_path, playbook_vars)
         else:
-            logger.info(f"[OPERATOR] Unknown action: {action}, skipping.")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Unknown action: {action}, skipping.")
+            log_event(f"[OPERATOR] Unknown action: {action}, skipping.")
             return {'phase': 'Skipped', 'message': f'Unknown action: {action}'}
 
         # Kopf expects a dict with top-level status keys to patch .status
         if result['success']:
-            logger.info(f"[OPERATOR] Playbook succeeded for {action} on VM {vm_name}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Playbook succeeded for {action} on VM {vm_name}")
-            if result.get('output'):
-                logger.info(f"[OPERATOR] Playbook output:\n{result['output']}")
-                if log_queue:
-                    for line in result['output'].splitlines():
-                        log_queue.put(f"[PLAYBOOK] {line}")
+            log_event(f"[OPERATOR] Playbook succeeded for {action} on VM {vm_name}")
             patch.status['phase'] = 'Ready'
             patch.status['message'] = f"VM {vm_name} {action} completed successfully"
             patch.status['reason'] = 'Completed'
@@ -192,14 +178,7 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
             patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
             return
         else:
-            logger.info(f"[OPERATOR] Playbook failed for {action} on VM {vm_name}: {result['error']}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Playbook failed for {action} on VM {vm_name}: {result['error']}")
-            if result.get('output'):
-                logger.info(f"[OPERATOR] Playbook output:\n{result['output']}")
-                if log_queue:
-                    for line in result['output'].splitlines():
-                        log_queue.put(f"[PLAYBOOK] {line}")
+            log_event(f"[OPERATOR] Playbook failed for {action} on VM {vm_name}: {result['error']}")
             patch.status['phase'] = 'Failed'
             patch.status['message'] = f"Failed to {action} VM: {result['error']}"
             patch.status['reason'] = 'Error'
@@ -217,15 +196,11 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
             return
     except Exception as e:
         error_msg = f"[OPERATOR] Error processing WindowsVM {name}: {e}"
-        logger.error(error_msg)
-        if log_queue:
-            log_queue.put(error_msg)
+        log_event(error_msg)
         try:
             kopf.exception(body, reason='Error', message=error_msg)
         except Exception as patch_err:
-            logger.warning(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
+            log_event(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
         patch.status['phase'] = 'Failed'
         patch.status['message'] = error_msg
         patch.status['reason'] = 'Exception'
@@ -281,22 +256,16 @@ def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
 
     # Run uninstall playbook
     playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
-    logger.info(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
-    if log_queue:
-        log_queue.put(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
+    log_event(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
     result = run_ansible_playbook(playbook_path, {
         'action': 'uninstall',
         'vm_name': vm_name,
         'kubevirt_namespace': namespace
     })
     if result['success']:
-        logger.info(f"[OPERATOR] Uninstall playbook completed for VM {vm_name}")
-        if log_queue:
-            log_queue.put(f"[OPERATOR] Uninstall playbook completed for VM {vm_name}")
+        log_event(f"[OPERATOR] Uninstall playbook completed for VM {vm_name}")
     else:
-        logger.error(f"[OPERATOR] Uninstall playbook failed for VM {vm_name}: {result.get('error')}")
-        if log_queue:
-            log_queue.put(f"[OPERATOR] Uninstall playbook failed for VM {vm_name}: {result.get('error')}")
+        log_event(f"[OPERATOR] Uninstall playbook failed for VM {vm_name}: {result.get('error')}")
 
 # MSSQLServer Handlers
 @kopf.on.create('infra.example.com', 'v1', 'mssqlservers')
@@ -307,67 +276,86 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
     target_vm = spec['targetVM']['vmName']
     enabled = spec.get('enabled', True)
     msg = f"Processing MSSQLServer {name}: target_vm={target_vm}, enabled={enabled}"
-    logger.info(msg)
+    log_event(msg)
     try:
         kopf.info(body, reason='Processing', message=f'Starting MSSQL installation on VM {target_vm}')
-        logger.info(f"Operator: Starting MSSQL installation on VM {target_vm}")
+        log_event(f"Operator: Starting MSSQL installation on VM {target_vm}")
         if not enabled:
-            logger.info(f"MSSQLServer {name} is disabled, skipping playbook run.")
+            log_event(f"MSSQLServer {name} is disabled, skipping playbook run.")
             return
         # Use the namespace from the CR spec or fallback to the resource namespace
         vm_ns = spec['targetVM'].get('namespace', namespace)
         vm_status = check_target_vm_status(target_vm, vm_ns)
         if not vm_status['ready']:
-            logger.info(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
+            log_event(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
             return
-        # Run the appropriate Ansible playbook
-        playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
-        logger.info(f"Operator: Running Ansible playbook for MSSQL install on VM {target_vm}")
-        result = run_ansible_playbook(playbook_path, {
-            'action': 'install',
+        # Run the appropriate Ansible playbook (windows-automation-controller.yaml)
+        playbook_path = "/root/kubernetes-installer/windows-automation-controller.yaml"
+        log_event(f"Operator: Running Ansible playbook for MSSQL install on VM {target_vm}")
+        playbook_vars = {
             'vm_name': target_vm,
-            'kubevirt_namespace': vm_ns
-        })
+            'kubevirt_namespace': vm_ns,
+            'otel': False,
+            'otel_config': '',
+            'otel_token': '',
+            'otel_endpoint': '',
+        }
+        # Add MSSQL-specific vars from spec if present
+        if 'credentials' in spec:
+            playbook_vars['adminUser'] = spec['credentials'].get('adminUser', '')
+            playbook_vars['adminPasswordVaultPath'] = spec['credentials'].get('adminPasswordVaultPath', '')
+            playbook_vars['saPasswordVaultPath'] = spec['credentials'].get('saPasswordVaultPath', '')
+        if 'version' in spec:
+            playbook_vars['mssql_version'] = spec['version']
+        if 'installerPath' in spec:
+            playbook_vars['installerPath'] = spec['installerPath']
+        if 'installPath' in spec:
+            playbook_vars['installPath'] = spec['installPath']
+        if 'acceptLicense' in spec:
+            playbook_vars['acceptLicense'] = spec['acceptLicense']
+        if 'quietInstall' in spec:
+            playbook_vars['quietInstall'] = spec['quietInstall']
+        result = run_ansible_playbook(playbook_path, playbook_vars, stream_to_tui=True)
         if result['success']:
-            logger.info(f"Operator: Successfully installed MSSQL on VM {target_vm}")
+            log_event(f"Operator: Successfully installed MSSQL on VM {target_vm}")
             if result.get('output'):
-                logger.info(f"Playbook output:\n{result['output']}")
+                log_event(f"Playbook output:\n{result['output']}")
             return {'phase': 'Ready', 'message': f'MSSQL install completed successfully on {target_vm}'}
         else:
-            logger.info(f"Operator: Failed to install MSSQL on VM {target_vm}: {result['error']}")
+            log_event(f"Operator: Failed to install MSSQL on VM {target_vm}: {result['error']}")
             if result.get('output'):
-                logger.info(f"Playbook output:\n{result['output']}")
+                log_event(f"Playbook output:\n{result['output']}")
             return {'phase': 'Failed', 'message': f"Failed to install MSSQL: {result['error']}"}
     except Exception as e:
         error_msg = f"Error processing MSSQLServer {name}: {e}"
         logger.error(error_msg)
-        logger.info(error_msg)
+        log_event(error_msg)
         kopf.exception(body, reason='Error', message=error_msg)
         return {'phase': 'Failed', 'message': error_msg}
 
 
 # OTelCollector Handlers
-@kopf.on.create('infra.example.com', 'v1', 'otelcollectors')
-@kopf.on.update('infra.example.com', 'v1', 'otelcollectors')
-def handle_otelcollector(body, meta, spec, status, namespace, **kwargs):
+@kopf.on.create('infra.example.com', 'v1', 'windowsotelcollectors')
+@kopf.on.update('infra.example.com', 'v1', 'windowsotelcollectors')
+def handle_windowsotelcollector(body, meta, spec, status, namespace, **kwargs):
     """Handle OTelCollector resource changes"""
     name = meta.get('name')
     target_vm = spec['targetVM']['vmName']
     enabled = spec.get('enabled', True)
     metrics_type = spec.get('metricsType', 'os')
     msg = f"Processing OTelCollector {name}: target_vm={target_vm}, metrics_type={metrics_type}, enabled={enabled}"
-    logger.info(msg)
+    log_event(msg)
     try:
         kopf.info(body, reason='Processing', message=f'Starting OpenTelemetry Collector installation on VM {target_vm}')
-        logger.info(f"Operator: Starting OpenTelemetry Collector installation on VM {target_vm}")
+        log_event(f"Operator: Starting OpenTelemetry Collector installation on VM {target_vm}")
         if not enabled:
-            logger.info(f"OTelCollector {name} is disabled, skipping playbook run.")
+            log_event(f"OTelCollector {name} is disabled, skipping playbook run.")
             return
         # Use the namespace from the CR spec or fallback to the resource namespace
         vm_ns = spec['targetVM'].get('namespace', namespace)
         vm_status = check_target_vm_status(target_vm, vm_ns)
         if not vm_status['ready']:
-            logger.info(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
+            log_event(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
             return
 
         # Check MSSQL prerequisite if collecting MSSQL metrics
@@ -376,33 +364,51 @@ def handle_otelcollector(body, meta, spec, status, namespace, **kwargs):
             if not mssql_status['available']:
                 logger.info(f"MSSQL is required for metrics type '{metrics_type}' but not available on VM {target_vm}. Skipping playbook run.")
                 return
-        
-        # Run the appropriate Ansible playbook
-        playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
-        logger.info(f"Operator: Running Ansible playbook for OTelCollector install on VM {target_vm}")
-        result = run_ansible_playbook(playbook_path, {
-            'action': 'install',
+        # Run the appropriate Ansible playbook (windows-automation-controller.yaml)
+        playbook_path = "/root/kubernetes-installer/windows-automation-controller.yaml"
+        log_event(f"Operator: Running Ansible playbook for WindowsOTelCollector install on VM {target_vm}")
+        playbook_vars = {
             'vm_name': target_vm,
-            'kubevirt_namespace': vm_ns
-        })
+            'kubevirt_namespace': vm_ns,
+            'otel': True,
+            'otel_config': spec.get('metricsType', ''),
+            'otel_token': spec.get('token', ''),
+            'otel_endpoint': spec.get('endpoint', ''),
+        }
+        # Add additional OTel-specific vars if present
+        if 'collectorVersion' in spec:
+            playbook_vars['collectorVersion'] = spec['collectorVersion']
+        if 'configPath' in spec:
+            playbook_vars['configPath'] = spec['configPath']
+        if 'installPath' in spec:
+            playbook_vars['installPath'] = spec['installPath']
+        if 'tempPath' in spec:
+            playbook_vars['tempPath'] = spec['tempPath']
+        if 'serviceConfig' in spec:
+            for k, v in spec['serviceConfig'].items():
+                playbook_vars[k] = v
+        if 'credentials' in spec:
+            playbook_vars['adminUser'] = spec['credentials'].get('adminUser', '')
+            playbook_vars['adminPasswordVaultPath'] = spec['credentials'].get('adminPasswordVaultPath', '')
+        result = run_ansible_playbook(playbook_path, playbook_vars, stream_to_tui=True)
         if result['success']:
-            logger.info(f"Operator: Successfully installed OTelCollector on VM {target_vm}")
+            log_event(f"Operator: Successfully installed OTelCollector on VM {target_vm}")
             if result.get('output'):
-                logger.info(f"Playbook output:\n{result['output']}")
+                log_event(f"Playbook output:\n{result['output']}")
             return {'phase': 'Ready', 'message': f'OTelCollector install completed successfully on {target_vm}'}
         else:
-            logger.info(f"Operator: Failed to install OTelCollector on VM {target_vm}: {result['error']}")
+            log_event(f"Operator: Failed to install OTelCollector on VM {target_vm}: {result['error']}")
             if result.get('output'):
-                logger.info(f"Playbook output:\n{result['output']}")
+                log_event(f"Playbook output:\n{result['output']}")
             return {'phase': 'Failed', 'message': f"Failed to install OTelCollector: {result['error']}"}
     except Exception as e:
         error_msg = f"Error processing OTelCollector {name}: {e}"
         logger.error(error_msg)
-        logger.info(error_msg)
+        log_event(error_msg)
         kopf.exception(body, reason='Error', message=error_msg)
         return {'phase': 'Failed', 'message': error_msg}
 
-def run_ansible_playbook(playbook_path, variables):
+def run_ansible_playbook(playbook_path, variables, stream_to_tui=False):
     """Run Ansible playbook with given variables and stream output line by line"""
     import shlex
     try:
@@ -418,7 +424,8 @@ def run_ansible_playbook(playbook_path, variables):
         logger.info(f"[OPERATOR] Running command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
         if log_queue:
             log_queue.put(f"[OPERATOR] Running command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
-        # Run the playbook and stream output
+        output_lines = []
+        playbook_completed = False
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -427,45 +434,32 @@ def run_ansible_playbook(playbook_path, variables):
             bufsize=1,
             universal_newlines=True
         )
-        output_lines = []
-        playbook_completed = False
         for line in process.stdout:
             line = line.rstrip()
-            logger.info(f"[PLAYBOOK] {line}")  # Stream to console in real time
-            if log_queue:
-                log_queue.put(f"[PLAYBOOK] {line}")
+            logger.info(f"[PLAYBOOK] {line}")
             output_lines.append(line)
             # Detect playbook completion by looking for the final task and PLAY RECAP
             if 'TASK [Display completion message]' in line or 'PLAY RECAP' in line:
                 playbook_completed = True
                 if 'PLAY RECAP' in line:
                     logger.info("[PLAYBOOK] --- End of playbook execution detected ---")
-                    if log_queue:
-                        log_queue.put("[PLAYBOOK] --- End of playbook execution detected ---")
-        if playbook_completed and log_queue:
-            log_queue.put("[PLAYBOOK] Playbook execution has completed. Check above for summary.")
+        # No direct log_queue.put for playbook lines; logger handles all log routing
+        if playbook_completed:
+            logger.info("[PLAYBOOK] Playbook execution has completed. Check above for summary.")
         process.wait()
         if process.returncode == 0:
             logger.info("[OPERATOR] Ansible playbook completed successfully")
-            if log_queue:
-                log_queue.put("[OPERATOR] Ansible playbook completed successfully")
             return {'success': True, 'output': '\n'.join(output_lines)}
         else:
             logger.error(f"[OPERATOR] Ansible playbook failed with code {process.returncode}")
-            if log_queue:
-                log_queue.put(f"[OPERATOR] Ansible playbook failed with code {process.returncode}")
             return {'success': False, 'error': f'Playbook failed with code {process.returncode}', 'output': '\n'.join(output_lines)}
     except subprocess.TimeoutExpired:
         error_msg = "[OPERATOR] Ansible playbook timed out after 30 minutes"
         logger.error(error_msg)
-        if log_queue:
-            log_queue.put(error_msg)
         return {'success': False, 'error': error_msg}
     except Exception as e:
         error_msg = f"[OPERATOR] Error running Ansible playbook: {e}"
         logger.error(error_msg)
-        if log_queue:
-            log_queue.put(error_msg)
         return {'success': False, 'error': error_msg}
 
 def check_target_vm_status(vm_name, kubevirt_namespace):
