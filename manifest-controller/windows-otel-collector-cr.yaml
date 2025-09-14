@@ -16,7 +16,7 @@ spec:
   installPath: "C:\\Data\\otelcol"
   tempPath: "C:\\Data\\temp"
   serviceConfig:
-    serviceName: "otelcollector"
+    serviceName: "windowsotelcollector"
     startType: "auto"
     useScheduledTask: true
   credentials:

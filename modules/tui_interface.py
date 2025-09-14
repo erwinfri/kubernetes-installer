@@ -1278,7 +1278,9 @@ class WindowsServicesTUI:
                 cr_path = os.path.join(folder, fname)
                 cr_options.append((fname, cr_path, 'Local CR YAML'))
             def handle_cr_delete_selection(cr_name, cr_path, _status=None):
-                self.add_log_line(f"🗑️ Deleting CR: {cr_name}")
+                self.close_popup()
+                self.add_log_line(f"🗑️ Delete CR command sent for {cr_name}")
+                self.update_status_display()  # Force immediate status refresh
                 import subprocess
                 result = subprocess.run(['kubectl', 'delete', '-f', cr_path], capture_output=True, text=True)
                 if result.returncode == 0:
@@ -1292,7 +1294,6 @@ class WindowsServicesTUI:
                     else:
                         self.add_log_line(f"❌ Failed to delete CR {cr_name}: {err}")
             def popup_callback(cr_name, cr_path, status=None):
-                self.close_popup()
                 handle_cr_delete_selection(cr_name, cr_path, status)
             cr_options_for_popup = [(name, path, status) for (name, path, status) in cr_options]
             self.show_cr_selection_popup(
