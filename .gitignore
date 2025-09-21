@@ -23,3 +23,9 @@ archive/
 *.out
 *.o
 *.txt
+*.tar
+*.gz
+*.tar.bz2
+*.7z
+*.tar.gz
+
