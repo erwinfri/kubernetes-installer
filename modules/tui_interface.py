@@ -1,7 +1,7 @@
 """
-Enhanced TUI Interface for Windows Services Management
+Enhanced TUI Interface for Kubernetes CRD/CR Management
 Full-featured interface matching original kopf-urwid-controller.py functionality
-with consolidated VMs/Services view
+with consolidated CRD/CR Deployment Overview
 """
 
 import urwid
@@ -11,6 +11,9 @@ import time
 from datetime import datetime
 import threading
 import os
+import subprocess
+import json
+import yaml
 
 
 # Import canonical log_queue (no fallback, must be shared)
@@ -18,7 +21,7 @@ from modules.utils.logging_config import log_queue
 
 logger = logging.getLogger(__name__)
 
-class WindowsServicesTUI:
+class KubernetesCRDTUI:
     """Enhanced TUI interface with full functionality"""
     
     def __init__(self, service_manager):
@@ -64,62 +67,73 @@ class WindowsServicesTUI:
         self.setup_ui()
     
 
-    def apply_crds_menu(self, button):
-        """Show a menu to apply CRD YAMLs from manifest-controller, with ESC support."""
+    def show_universal_menu(self, title, menu_type, file_filter, action_callback, button_prefix=""):
+        """Universal menu system for all menu types - Apply CRD, Apply CR, Delete CR, etc."""
         import os
+        
+        self.add_log_line(f"🔍 show_universal_menu called: {title}")
+        
+        # Check if loop exists
+        if not hasattr(self, 'loop') or not self.loop:
+            self.add_log_line(f"❌ Error: TUI loop not initialized - cannot show menu")
+            return
+        
         folder = '/root/kubernetes-installer/manifest-controller'
+        if not os.path.exists(folder):
+            self.add_log_line(f"❌ manifest-controller folder not found: {folder}")
+            return
+            
         files = os.listdir(folder)
-        crd_files = [f for f in files if f.endswith('.yaml') and ('crd' in f.lower())]
-        if not crd_files:
+        filtered_files = [f for f in files if f.endswith('.yaml') and file_filter(f)]
+        
+        self.add_log_line(f"📂 Found {len(files)} total files, {len(filtered_files)} filtered files")
+        
+        if not filtered_files:
+            self.add_log_line(f"❌ No {menu_type} files found in manifest-controller folder")
             return
 
-        def handle_crd_apply_selection(crd_name, crd_path):
-            import subprocess
-            result = subprocess.run(['kubectl', 'apply', '-f', crd_path], capture_output=True, text=True)
-            if result.returncode == 0:
-                self.add_log_line(f"✅ CRD applied: {crd_name}")
-            else:
-                self.add_log_line(f"❌ Failed to apply CRD {crd_name}: {result.stderr}")
-                if 'no objects passed to apply' in result.stderr:
-                    self.add_log_line(f"⚠️ The file {crd_name} does not contain a valid Kubernetes object. Please check the YAML content.")
+        self.add_log_line(f"📋 Creating menu with {len(filtered_files)} items...")
 
-        # Custom button class for ESC handling
-        class CRDButton(urwid.Button):
-            def __init__(self, label, crd_name, crd_path, callback, tui_instance):
+        # Universal button class that works for all menu types
+        class UniversalMenuButton(urwid.Button):
+            def __init__(self, label, file_name, file_path, callback, tui_instance):
                 super().__init__(label)
-                self.crd_name = crd_name
-                self.crd_path = crd_path
+                self.file_name = file_name
+                self.file_path = file_path
                 self.callback = callback
                 self.tui = tui_instance
+                
             def keypress(self, size, key):
                 if key in ('enter', ' '):
+                    self.tui.add_log_line(f"🔥 UniversalMenuButton ENTER pressed for: {self.file_name}")
                     self.tui.close_popup()
-                    self.callback(self.crd_name, self.crd_path)
-                    return
+                    self.callback(self.file_name, self.file_path)
+                    return None
                 if key == 'esc' or key == 'escape':
+                    self.tui.add_log_line(f"🚪 UniversalMenuButton ESC pressed")
                     self.tui.close_popup()
                     self.tui.menu_state = None
                     self.tui.popup_listbox = None
                     self.tui.reset_menu_state()
-                    return
+                    return None
                 return super().keypress(size, key)
 
         menu_items = []
-        for crd_file in crd_files:
-            crd_path = os.path.join(folder, crd_file)
-            btn = CRDButton(f"CRD: {crd_file}", crd_file, crd_path, handle_crd_apply_selection, self)
+        for file_name in filtered_files:
+            file_path = os.path.join(folder, file_name)
+            btn = UniversalMenuButton(f"{button_prefix}{file_name}", file_name, file_path, action_callback, self)
             menu_items.append(urwid.AttrMap(btn, 'button', 'button_focus'))
 
         walker = urwid.SimpleFocusListWalker(menu_items)
         listbox = urwid.ListBox(walker)
         popup_content = urwid.Pile([
-            urwid.Text(('header', 'Apply CRDs - Select to Apply'), align='center'),
+            urwid.Text(('header', title), align='center'),
             urwid.Divider(),
             urwid.BoxAdapter(listbox, height=len(menu_items) + 2),
             urwid.Divider(),
-            urwid.Text("Use ↑↓ arrows and Enter to apply, ESC to cancel", align='center')
+            urwid.Text("Use ↑↓ arrows and Enter to select, ESC to cancel", align='center')
         ])
-        dialog = urwid.LineBox(popup_content, title="Apply CRDs")
+        dialog = urwid.LineBox(popup_content, title=title)
         overlay = urwid.Overlay(
             dialog,
             self.main_frame,
@@ -128,84 +142,46 @@ class WindowsServicesTUI:
             valign='middle',
             height=len(menu_items) + 8
         )
-        self.original_widget = self.loop.widget
-        self.loop.widget = overlay
-        self.menu_state = 'crd_popup'
-        self.popup_listbox = listbox
-
-    def apply_cr_menu(self, button):
-        """Show a menu to apply CR YAMLs from manifest-controller."""
-        import os
-        folder = '/root/kubernetes-installer/manifest-controller'
-        files = os.listdir(folder)
-        cr_files = [f for f in files if f.endswith('.yaml') and ('crd' not in f.lower())]
-        if not cr_files:
-            return
-
-        def handle_cr_apply_selection(cr_name, cr_path):
-            import subprocess
-            result = subprocess.run(['kubectl', 'apply', '-f', cr_path], capture_output=True, text=True)
-            if result.returncode == 0:
-                self.add_log_line(f"✅ CR applied: {cr_name}")
-            else:
-                self.add_log_line(f"❌ Failed to apply CR {cr_name}: {result.stderr}")
-
-        menu_items = []
-        for cr_file in cr_files:
-            cr_path = os.path.join(folder, cr_file)
-            btn = urwid.Button(f"CR: {cr_file}", on_press=lambda button, f=cr_file, p=cr_path: (self.close_popup(), handle_cr_apply_selection(f, p)))
-            menu_items.append(urwid.AttrMap(btn, 'button', 'button_focus'))
-
-        walker = urwid.SimpleFocusListWalker(menu_items)
-        listbox = urwid.ListBox(walker)
-        popup_content = urwid.Pile([
-            urwid.Text(('header', 'Apply CRs - Select to Apply'), align='center'),
-            urwid.Divider(),
-            urwid.BoxAdapter(listbox, height=len(menu_items) + 2),
-            urwid.Divider(),
-            urwid.Text("Use ↑↓ arrows and Enter to apply, ESC to cancel", align='center')
-        ])
-        dialog = urwid.LineBox(popup_content, title="Apply CRs")
-        overlay = urwid.Overlay(
-            dialog,
-            self.main_frame,
-            align='center',
-            width=60,
-            valign='middle',
-            height=len(menu_items) + 8
-        )
-        self.original_widget = self.loop.widget
-        self.loop.widget = overlay
-        self.menu_state = 'cr_popup'
-        self.popup_listbox = listbox
-
-    def setup_ui(self):
-        """Set up the enhanced user interface"""
-        # Header
-        header = urwid.Text(('header', 'Windows Services Management Console - Enhanced Modular System'), align='center')
-        header = urwid.AttrMap(header, 'header')
         
-        # Menu bar with action-focused functions
-        menu_items = [
-            ('Install', self.install_menu),
-            ('Uninstall', self.uninstall_menu),
-            ('Apply CRs', self.apply_cr_menu),
-            ('Apply CRDs', self.apply_crds_menu),
-            ('Delete CR', self.delete_cr_menu),
-            ('Fix Issues', self.fix_issues),
-            ('Clear Logs', self.clear_logs),
-            ('Quit', self.quit_app)
-        ]
+        self.add_log_line(f"🎯 Setting up overlay and switching to popup...")
+        self.original_widget = self.loop.widget
+        self.loop.widget = overlay
+        self.menu_state = 'universal_menu'
+        self.popup_listbox = listbox
+        self.add_log_line(f"✅ Menu popup displayed successfully")
+
+    def apply_crds_menu(self, button):
+        """Show a menu to apply CRD YAMLs from manifest-controller"""
+        def handle_crd_apply_selection(file_name, file_path):
+            result = subprocess.run(['kubectl', 'apply', '-f', file_path], capture_output=True, text=True)
+            if result.returncode == 0:
+                self.add_log_line(f"✅ CRD applied: {file_name}")
+            else:
+                self.add_log_line(f"❌ Failed to apply CRD {file_name}: {result.stderr}")
+                if 'no objects passed to apply' in result.stderr:
+                    self.add_log_line(f"⚠️ The file {file_name} does not contain a valid Kubernetes CRD/CR object. Please check the YAML content.")
+
+        def crd_filter(filename):
+            return 'crd' in filename.lower()
+            
+        self.show_universal_menu(
+            "Apply CRDs - Select to Apply", 
+            "CRD", 
+            crd_filter, 
+            handle_crd_apply_selection, 
+            "CRD: "
+        )
+
     def setup_ui(self):
         """Set up the enhanced user interface"""
         # Header
-        header = urwid.Text(('header', 'Windows Services Management Console - Enhanced Modular System'), align='center')
+        header = urwid.Text(('header', 'Intent Based Services Management Console - Enhanced Modular System'), align='center')
         header = urwid.AttrMap(header, 'header')
 
-        # Status display panel - consolidated VMs/Services view
+        # Status display panel - consolidated CRD/CR Deployment Overview
         self.status_walker = urwid.SimpleFocusListWalker([])
         self.status_listbox = urwid.ListBox(self.status_walker)
-        self.status_frame = urwid.LineBox(self.status_listbox, title="VMs & Services Status Overview")
+        self.status_frame = urwid.LineBox(self.status_listbox, title="Kubernetes/KubeVirt Deployment Overview")
 
         # Log display
         self.log_walker = urwid.SimpleFocusListWalker([])
@@ -219,18 +195,16 @@ class WindowsServicesTUI:
         ], dividechars=1, focus_column=1)
 
         # Footer with streamlined navigation instructions
-        footer_text = "F2:Status F6:Install F7:Apply F8:AutoScroll F9:Reset Tab:Switch ←→:Navigate Q:Quit ESC:Cancel"
+        footer_text = "F2:Status F6:CRDs F7:CRs F8:AutoScroll F9:Reset Tab:Switch ←→:Navigate Q:Quit ESC:Cancel"
         footer = urwid.Text(('footer', footer_text), align='center')
         footer = urwid.AttrMap(footer, 'footer')
 
         # Menu bar with action-focused functions
         menu_items = [
-            ('Install', self.install_menu),
-            ('Uninstall', self.uninstall_menu),
-            ('Apply CRs', self.apply_cr_menu),
             ('Apply CRDs', self.apply_crds_menu),
+            ('Apply CRs', self.apply_cr_menu),
             ('Delete CR', self.delete_cr_menu),
-            ('Fix Issues', self.fix_issues),
+            ('Delete CRD', self.delete_crd_menu),
             ('Clear Logs', self.clear_logs),
             ('Quit', self.quit_app)
         ]
@@ -263,10 +237,10 @@ class WindowsServicesTUI:
     def show_vms_tab(self, button=None):
         """Switch to VMs view in status display"""
         self.active_service_tab = 'vms'
-        self.status_frame.set_title("Windows VMs Status")
+        self.status_frame.set_title("Virtual Machines Status")
         self.update_status_display()
         if button:  # Only log if called via button/menu
-            self.add_log_line("📊 Switched to Windows VMs view")
+            self.add_log_line("�️ Switched to Virtual Machines view")
     
     def show_mssql_tab(self, button=None):
         """Switch to MSSQL services view in status display"""
@@ -285,7 +259,7 @@ class WindowsServicesTUI:
             self.add_log_line("📊 Switched to OpenTelemetry view")
     
     def update_status_display(self):
-        """Update the consolidated status display"""
+        """Update the consolidated status display with clean CRD tree view"""
         try:
             current_time = time.time()
             
@@ -295,42 +269,178 @@ class WindowsServicesTUI:
             
             self.last_status_update = current_time
             
-            # Get comprehensive status from service manager
-            status_report = self.service_manager.get_comprehensive_status()
-            
             # Clear existing status display
             self.status_walker.clear()
             
-            # Add header with timestamp
+            # Add clean header with timestamp
             timestamp = datetime.now().strftime("%H:%M:%S")
-            if self.active_service_tab == 'vms':
-                header_text = f'🖥️ WINDOWS VMs STATUS ({timestamp})'
-                self.update_vm_status_display(status_report)
-            elif self.active_service_tab == 'mssql':
-                header_text = f'🗄️ MSSQL SERVICES STATUS ({timestamp})'
-                self.update_mssql_status_display(status_report)
-            elif self.active_service_tab == 'otel':
-                header_text = f'📊 OPENTELEMETRY STATUS ({timestamp})'
-                self.update_otel_status_display(status_report)
+            header_text = f'� CRD DEPLOYMENT STATUS ({timestamp})'
             
             # Insert header at top
-            self.status_walker.insert(0, urwid.Text(('header', f'=== {header_text} ===')))
-            self.status_walker.insert(1, urwid.Text(""))
+            self.status_walker.append(urwid.Text(('header', f'=== {header_text} ===')))
+            self.status_walker.append(urwid.Text(""))
             
-            # Store status data for other methods
-            self.status_data = status_report;
+            # Build simple CRD tree view
+            self.build_crd_tree_view()
             
         except Exception as e:
             self.status_walker.clear()
             self.status_walker.append(urwid.Text(('log_error', f'Error updating status: {e}')))
     
+    def build_crd_tree_view(self):
+        """Build a clean CRD tree view showing local files and deployment status"""
+        import os
+        import yaml
+        import subprocess
+        
+        try:
+            # Get CRD files from manifest-controller folder
+            folder = '/root/kubernetes-installer/manifest-controller'
+            if not os.path.exists(folder):
+                self.status_walker.append(urwid.Text(('log_error', '❌ manifest-controller folder not found')))
+                return
+            
+            files = os.listdir(folder)
+            crd_files = [f for f in files if f.endswith('.yaml') and 'crd' in f.lower()]
+            cr_files = [f for f in files if f.endswith('.yaml') and 'crd' not in f.lower()]
+            
+            if not crd_files and not cr_files:
+                self.status_walker.append(urwid.Text(('log_warning', '⚠️ No CRD or CR files found')))
+                return
+            
+            # Get deployed CRDs from cluster
+            deployed_crds = set()
+            try:
+                result = subprocess.run(['kubectl', 'get', 'crd', '-o', 'name'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if line.strip():
+                            # Format: customresourcedefinition.apiextensions.k8s.io/<crd_name>
+                            parts = line.split('/')
+                            if len(parts) == 2:
+                                deployed_crds.add(parts[1])
+            except Exception:
+                pass  # If kubectl fails, just show all as not deployed
+            
+            # Build tree view
+            self.status_walker.append(urwid.Text(('header', '📁 CRD FILES:')))
+            
+            deployed_crd_count = 0
+            if crd_files:
+                for crd_file in sorted(crd_files):
+                    crd_path = os.path.join(folder, crd_file)
+                    
+                    # Get CRD name from file
+                    crd_name = 'unknown'
+                    try:
+                        with open(crd_path, 'r') as f:
+                            crd_content = yaml.safe_load(f)
+                        if crd_content and crd_content.get('kind') == 'CustomResourceDefinition':
+                            crd_name = crd_content.get('metadata', {}).get('name', 'unknown')
+                    except Exception:
+                        pass
+                    
+                    # Check deployment status
+                    if crd_name in deployed_crds:
+                        status_icon = '🟢'
+                        status_color = 'status_running'
+                        deployed_crd_count += 1
+                    else:
+                        status_icon = '🔴' 
+                        status_color = 'status_stopped'
+                    
+                    # Display CRD with status (just filename)
+                    line = f'  {status_icon} {crd_file}'
+                    self.status_walker.append(urwid.Text((status_color, line)))
+            else:
+                self.status_walker.append(urwid.Text(('log_warning', '  ⚠️ No CRD files found')))
+                deployed_crd_count = 0
+            
+            self.status_walker.append(urwid.Text(""))
+            self.status_walker.append(urwid.Text(('header', '📄 CR FILES:')))
+            
+            deployed_cr_count = 0
+            if cr_files:
+                for cr_file in sorted(cr_files):
+                    cr_path = os.path.join(folder, cr_file)
+                    
+                    # Get CR info from file
+                    cr_kind = 'unknown'
+                    cr_name = 'unknown'
+                    try:
+                        with open(cr_path, 'r') as f:
+                            cr_content = yaml.safe_load(f)
+                        if cr_content:
+                            cr_kind = cr_content.get('kind', 'unknown')
+                            cr_name = cr_content.get('metadata', {}).get('name', 'unknown')
+                    except Exception:
+                        pass
+                    
+                    # Check if CR is deployed (simplified check)
+                    is_deployed = False
+                    try:
+                        # Try to get the specific CR from cluster
+                        result = subprocess.run(['kubectl', 'get', cr_kind.lower(), cr_name], 
+                                              capture_output=True, text=True, timeout=3)
+                        is_deployed = (result.returncode == 0)
+                    except Exception:
+                        pass
+                    
+                    if is_deployed:
+                        status_icon = '🟢'
+                        status_color = 'status_running'
+                        deployed_cr_count += 1
+                    else:
+                        status_icon = '🔴'
+                        status_color = 'status_stopped'
+                    
+                    # Display CR with status (just filename)
+                    line = f'  {status_icon} {cr_file}'
+                    self.status_walker.append(urwid.Text((status_color, line)))
+            else:
+                self.status_walker.append(urwid.Text(('log_warning', '  ⚠️ No CR files found')))
+                deployed_cr_count = 0
+            
+            # Simple summary
+            total_crds = len(crd_files)
+            total_crs = len(cr_files)
+            
+            self.status_walker.append(urwid.Text(""))
+            self.status_walker.append(urwid.Text(('header', f'📊 SUMMARY: CRDs {deployed_crd_count}/{total_crds} | CRs {deployed_cr_count}/{total_crs}')))
+            
+        except Exception as e:
+            self.status_walker.append(urwid.Text(('log_error', f'❌ Error building tree view: {e}')))
+    
+    def _get_crd_name_from_file(self, file_path):
+        """Helper to extract CRD name from YAML file"""
+        try:
+            with open(file_path, 'r') as f:
+                content = yaml.safe_load(f)
+            if content and content.get('kind') == 'CustomResourceDefinition':
+                return content.get('metadata', {}).get('name', 'unknown')
+        except Exception:
+            pass
+        return 'unknown'
+    
     def update_vm_status_display(self, status_report):
-        """Update VM status display with scenarios"""
-        # VM scenarios
-        scenarios = status_report.get('scenarios', {})
-        if scenarios:
+        """Update VM status display with scenarios for all VM types (Windows, RedHat, etc.)"""
+        # Check for both Windows and RedHat VMs
+        all_vm_scenarios = {}
+        
+        # Get Windows VM scenarios
+        windows_scenarios = status_report.get('scenarios', {})
+        for vm_name, data in windows_scenarios.items():
+            all_vm_scenarios[f"Windows-{vm_name}"] = data
+            
+        # Get RedHat VM scenarios (if available)
+        redhat_scenarios = status_report.get('redhat_scenarios', {})
+        for vm_name, data in redhat_scenarios.items():
+            all_vm_scenarios[f"RedHat-{vm_name}"] = data
+        
+        if all_vm_scenarios:
             self.status_walker.append(urwid.Text(('service_vm', '📊 VM SCENARIO ANALYSIS:')))
-            for vm_name, scenario_data in scenarios.items():
+            for vm_name, scenario_data in all_vm_scenarios.items():
                 scenario = scenario_data['scenario']
                 
                 # Color coding based on scenario
@@ -362,8 +472,11 @@ class WindowsServicesTUI:
         else:
             self.status_walker.append(urwid.Text(('status_unknown', '❓ No VMs found')))
         
-        # Summary statistics
-        windowsvm_summary = status_report.get('summary', {}).get('windowsvm', {})
+        # Summary statistics for all VM types and services
+        summary_data = status_report.get('summary', {})
+        windowsvm_summary = summary_data.get('windowsvm', {})
+        redhatvm_summary = summary_data.get('redhatvm', {})
+        
         import os
         crd_files = []
         crd_names_in_folder = set()
@@ -407,11 +520,20 @@ class WindowsServicesTUI:
         # Count matches
         matching_crds = crd_names_in_folder & deployed_crd_names
         match_count = len(matching_crds)
-        self.status_walker.append(urwid.Text(('header', '📈 VM SUMMARY:')))
+        self.status_walker.append(urwid.Text(('header', '📈 VIRTUAL MACHINES SUMMARY:')))
         self.status_walker.append(urwid.Text(f"CRDs in folder: {crd_count} | Deployed CRDs: {deployed_crd_count} | Matching: {match_count}"))
-        self.status_walker.append(urwid.Text(f"Local CRs: {windowsvm_summary.get('local_count', 0)}"))
-        self.status_walker.append(urwid.Text(f"Deployed CRs: {windowsvm_summary.get('deployed_count', 0)}"))
-        self.status_walker.append(urwid.Text(f"Running VMs: {windowsvm_summary.get('running_count', 0)}"))
+        
+        # Windows VMs
+        if windowsvm_summary:
+            self.status_walker.append(urwid.Text(f"Windows VMs - Local CRs: {windowsvm_summary.get('local_count', 0)} | Deployed: {windowsvm_summary.get('deployed_count', 0)} | Running: {windowsvm_summary.get('running_count', 0)}"))
+        
+        # RedHat VMs
+        if redhatvm_summary:
+            self.status_walker.append(urwid.Text(f"RedHat VMs - Local CRs: {redhatvm_summary.get('local_count', 0)} | Deployed: {redhatvm_summary.get('deployed_count', 0)} | Running: {redhatvm_summary.get('running_count', 0)}"))
+        
+        # If no VM data available, show basic info
+        if not windowsvm_summary and not redhatvm_summary:
+            self.status_walker.append(urwid.Text(f"Local CRs: 0 | Deployed CRs: 0 | Running VMs: 0"))
     
     def update_mssql_status_display(self, status_report):
         """Update MSSQL services status display"""
@@ -538,103 +660,577 @@ class WindowsServicesTUI:
                 pass
     
     # Menu action methods with central popup windows
-    def install_menu(self, button):
-        """Show install service selection in central popup"""
-        self.show_service_selection_popup("INSTALL", [
-            ("1", "Windows VM Deploy", "🖥️", "Deploy Windows Virtual Machines"),
-            ("2", "MSSQL Windows Service Deploy", "🗄️", "Deploy SQL Server instances"),  
-            ("3", "Windows OTel Service Deploy", "📊", "Deploy OpenTelemetry collectors")
-        ], self.handle_install_selection)
-    
-    def uninstall_menu(self, button):
-        """Show uninstall service selection in central popup"""
-        self.show_service_selection_popup("UNINSTALL", [
-            ("1", "Windows VM Uninstall", "🖥️", "Remove Windows Virtual Machines"),
-            ("2", "MSSQL Service Uninstall", "🗄️", "Remove SQL Server instances"),
-            ("3", "OTel Service Uninstall", "📊", "Remove OpenTelemetry collectors")
-        ], self.handle_uninstall_selection)
-    
     def apply_cr_menu(self, button):
-        """Show apply CR service selection in central popup"""
-        self.show_service_selection_popup("APPLY CRs", [
-            ("1", "Windows VM CRs", "🖥️", "Apply Windows VM Custom Resources"),
-            ("2", "MSSQL Service CRs", "🗄️", "Apply MSSQL Custom Resources"),
-            ("3", "OTel Service CRs", "📊", "Apply OpenTelemetry Custom Resources")
-        ], self.handle_apply_selection)
+        """Show a menu to apply CR YAMLs from manifest-controller"""
+        self.add_log_line(f"📋 apply_cr_menu called - starting apply CR menu...")
+        
+        def handle_cr_apply_selection(file_name, file_path):
+            self.add_log_line(f"🚀 Applying CR: {file_name} using kubectl...")
+            result = subprocess.run(['kubectl', 'apply', '-f', file_path], capture_output=True, text=True)
+            if result.returncode == 0:
+                self.add_log_line(f"✅ CR applied: {file_name}")
+                if result.stdout:
+                    self.add_log_line(f"🔎 kubectl output: {result.stdout.strip()}")
+            else:
+                self.add_log_line(f"❌ Failed to apply CR {file_name}!")
+                self.add_log_line(f"🔎 kubectl stderr: {result.stderr.strip()}")
+                self.add_log_line(f"🔎 kubectl stdout: {result.stdout.strip()}")
+
+        def cr_filter(filename):
+            return 'crd' not in filename.lower()
+            
+        self.show_universal_menu(
+            "Apply CRs - Select to Apply", 
+            "CR", 
+            cr_filter, 
+            handle_cr_apply_selection, 
+            "CR: "
+        )
     
     def delete_cr_menu(self, button):
-        """Show delete CR service selection in central popup"""
-        self.show_service_selection_popup("DELETE CRs", [
-            ("1", "Windows VM CRs", "🖥️", "Delete Windows VM Custom Resources"),
-            ("2", "MSSQL Service CRs", "🗄️", "Delete MSSQL Custom Resources"),
-            ("3", "OTel Service CRs", "📊", "Delete OpenTelemetry Custom Resources")
-        ], self.handle_delete_selection)
+        """Show a menu to delete CR YAMLs from manifest-controller"""
+        self.add_log_line(f"🗑️ delete_cr_menu called - starting delete CR menu...")
+        
+        def handle_cr_delete_selection(file_name, file_path):
+            self.add_log_line(f"🔥 DELETE CALLBACK TRIGGERED: {file_name}")
+            self.add_log_line(f"🗑️ Deleting CR: {file_name}...")
+            
+            # Use timeout for kubectl delete to prevent hanging
+            try:
+                result = subprocess.run(['kubectl', 'delete', '-f', file_path], 
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    self.add_log_line(f"✅ CR deleted successfully: {file_name}")
+                    self.add_log_line(f"👀 Monitoring operator response...")
+                    
+                    # PICKUP ACTION 1: Update status display immediately
+                    self.update_status_display()
+                    
+                    # PICKUP ACTION 2: Check for operator activity
+                    self.monitor_operator_deletion_activity(file_name, file_path)
+                    
+                    # PICKUP ACTION 3: Check for associated cleanup actions
+                    self.trigger_post_delete_cleanup(file_name, file_path)
+                else:
+                    err = result.stderr
+                    if 'NotFound' in err and 'error when deleting' in err:
+                        self.add_log_line(f"⚠️ CR not found in cluster (already deleted): {file_name}")
+                        # Still update status display and trigger cleanup
+                        self.update_status_display()
+                        self.trigger_post_delete_cleanup(file_name, file_path)
+                    elif 'CRD' in err and 'not found' in err:
+                        self.add_log_line(f"⚠️ CRD not found for {file_name}, but that's expected if CRDs aren't deployed")
+                    else:
+                        self.add_log_line(f"❌ Failed to delete CR {file_name}: {err}")
+            except subprocess.TimeoutExpired:
+                self.add_log_line(f"⏰ kubectl delete timed out for {file_name}")
+                self.add_log_line(f"🔧 This may be due to stuck finalizers or unresponsive operators")
+                self.add_log_line(f"💡 Try: kubectl patch {file_name.replace('.yaml', '')} --type='merge' -p='{{\"metadata\":{{\"finalizers\":[]}}}}'")
+                # Still try to run cleanup
+                self.trigger_post_delete_cleanup(file_name, file_path)
 
-    def show_cr_selection_popup(self, title, cr_options, callback):
-        """Show CR selection in a dropdown popup with arrow navigation"""
-        if not cr_options:
+        def cr_filter(filename):
+            is_cr = 'crd' not in filename.lower()
+            self.add_log_line(f"🔍 CR filter: {filename} -> {is_cr}")
+            return is_cr
+            
+        self.add_log_line(f"📋 Calling show_universal_menu for Delete CRs...")
+        self.show_universal_menu(
+            "Delete CRs - Select to Delete", 
+            "CR", 
+            cr_filter, 
+            handle_cr_delete_selection, 
+            "CR: "
+        )
+
+    def monitor_operator_deletion_activity(self, cr_file, cr_path):
+        """Monitor and display operator activity after CR deletion"""
+        import subprocess
+        import time
+        
+        self.add_log_line(f"🎯 === OPERATOR DELETION MONITORING ===")
+        self.add_log_line(f"📋 Checking for operator response to {cr_file} deletion...")
+        
+        # Determine the service type for targeted monitoring
+        service_type = None
+        if 'redhatvm' in cr_file.lower():
+            service_type = 'redhatvm'
+        elif 'windowsvm' in cr_file.lower() or 'windows-server' in cr_file.lower():
+            service_type = 'windowsvm'
+        elif 'mssql' in cr_file.lower():
+            service_type = 'mssql'
+        elif 'otel' in cr_file.lower():
+            service_type = 'otel'
+        
+        if service_type:
+            self.add_log_line(f"🔍 Monitoring {service_type} operator activity...")
+            
+            # Check for operator pods that should handle this deletion
+            try:
+                result = subprocess.run([
+                    'kubectl', 'get', 'pods', '-A', 
+                    '--field-selector=status.phase=Running',
+                    '-o', 'name'
+                ], capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    running_pods = result.stdout.strip().split('\n')
+                    operator_pods = [pod for pod in running_pods if service_type in pod.lower() or 'kopf' in pod.lower()]
+                    
+                    if operator_pods:
+                        self.add_log_line(f"🤖 Found {len(operator_pods)} operator pod(s) running")
+                        for pod in operator_pods[:3]:  # Show first 3
+                            self.add_log_line(f"  📦 {pod}")
+                    else:
+                        self.add_log_line(f"⚠️ No {service_type} operator pods found running")
+                        self.add_log_line(f"💡 Deletion cleanup may need to be done manually")
+                        
+            except subprocess.TimeoutExpired:
+                self.add_log_line(f"⏰ Operator pod check timed out")
+            except Exception as e:
+                self.add_log_line(f"❌ Error checking operator pods: {e}")
+        
+        # Check for recent events related to the deletion
+        self.add_log_line(f"📰 Checking for recent deletion events...")
+        try:
+            result = subprocess.run([
+                'kubectl', 'get', 'events', '--sort-by=.lastTimestamp', 
+                '--field-selector=reason=Killing,reason=Deleted,reason=SuccessfulDelete',
+                '-o', 'custom-columns=TIME:.lastTimestamp,REASON:.reason,MESSAGE:.message',
+                '--no-headers'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                events = result.stdout.strip().split('\n')[-3:]  # Last 3 events
+                self.add_log_line(f"📋 Recent deletion events:")
+                for event in events:
+                    if event.strip():
+                        self.add_log_line(f"  🔔 {event}")
+            else:
+                self.add_log_line(f"📭 No recent deletion events found")
+                
+        except subprocess.TimeoutExpired:
+            self.add_log_line(f"⏰ Event check timed out")
+        except Exception as e:
+            self.add_log_line(f"❌ Error checking events: {e}")
+        
+        # Show next expected actions
+        self.add_log_line(f"🎯 Expected next actions:")
+        if service_type == 'redhatvm':
+            self.add_log_line(f"  🖥️ VM termination and cleanup")
+            self.add_log_line(f"  💾 Storage volume cleanup")
+            self.add_log_line(f"  🔐 Secret cleanup")
+        elif service_type == 'windowsvm':
+            self.add_log_line(f"  🪟 Windows VM shutdown")
+            self.add_log_line(f"  💾 Disk cleanup")
+        elif service_type == 'mssql':
+            self.add_log_line(f"  🗄️ Database instance termination")
+            self.add_log_line(f"  💾 Persistent volume cleanup")
+        
+        self.add_log_line(f"⏳ Operator should pick up deletion within 30 seconds...")
+
+    def trigger_post_delete_cleanup(self, cr_file, cr_path):
+        """Pickup mechanism to handle post-deletion cleanup actions"""
+        self.add_log_line(f"🧹 === POST-DELETE CLEANUP PHASE ===")
+        self.add_log_line(f"🎯 Initiating cleanup sequence for {cr_file}...")
+        
+        # Determine service type and trigger appropriate cleanup
+        if 'redhatvm' in cr_file.lower() or 'windowsvm' in cr_file.lower():
+            self.add_log_line("🖥️ VM CR deleted - executing VM cleanup sequence...")
+            self.cleanup_vm_resources(cr_file)
+        elif 'mssql' in cr_file.lower():
+            self.add_log_line("🗄️ MSSQL CR deleted - executing database cleanup sequence...")
+            self.cleanup_mssql_resources(cr_file)
+        elif 'otel' in cr_file.lower():
+            self.add_log_line("📊 OTel CR deleted - executing collector cleanup sequence...")
+            self.cleanup_otel_resources(cr_file)
+        else:
+            self.add_log_line(f"📝 Generic CR deleted: {cr_file} - running basic cleanup...")
+        
+        # Show completion message
+        self.add_log_line(f"✨ Cleanup sequence completed for {cr_file}")
+        
+        # Always refresh status after cleanup
+        self.add_log_line("🔄 Refreshing status display after cleanup...")
+        self.update_status_display()
+        
+        # Final operator check
+        self.add_log_line("🎭 Final operator status check...")
+        self.check_operator_final_status(cr_file)
+
+    def cleanup_vm_resources(self, cr_file):
+        """Cleanup VM-specific resources after CR deletion"""
+        import subprocess
+        self.add_log_line(f"🖥️ Cleaning up VM resources for {cr_file}...")
+        
+        # Check for running VMs that might be orphaned with timeout
+        try:
+            self.add_log_line("🔍 Checking for running VMs (with 5s timeout)...")
+            result = subprocess.run(['kubectl', 'get', 'vmi', '-o', 'json'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                import json
+                vmis = json.loads(result.stdout)
+                vm_count = len(vmis.get('items', []))
+                self.add_log_line(f"📊 Found {vm_count} running VMs in cluster")
+            else:
+                self.add_log_line("⚠️ Could not check for running VMs (KubeVirt may not be installed)")
+        except subprocess.TimeoutExpired:
+            self.add_log_line(f"⏰ VM check timed out - skipping VM cleanup check")
+        except Exception as e:
+            self.add_log_line(f"⚠️ VM cleanup check failed: {e}")
+        
+        self.add_log_line(f"✅ VM cleanup completed for {cr_file}")
+
+    def force_remove_finalizers(self, cr_name, cr_type="redhatvm"):
+        """Force remove finalizers from stuck CRs"""
+        import subprocess
+        self.add_log_line(f"🔧 Attempting to force remove finalizers from {cr_name}...")
+        
+        try:
+            # Remove finalizers by patching the resource
+            patch_cmd = [
+                'kubectl', 'patch', cr_type, cr_name, 
+                '--type=merge', 
+                '-p={"metadata":{"finalizers":[]}}'
+            ]
+            result = subprocess.run(patch_cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Successfully removed finalizers from {cr_name}")
+            else:
+                self.add_log_line(f"❌ Failed to remove finalizers: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            self.add_log_line(f"⏰ Finalizer removal timed out for {cr_name}")
+        except Exception as e:
+            self.add_log_line(f"❌ Error removing finalizers: {e}")
+
+    def check_operator_final_status(self, cr_file):
+        """Final check of operator status after deletion"""
+        import subprocess
+        self.add_log_line(f"🎭 === OPERATOR FINAL STATUS CHECK ===")
+        
+        # Determine service type
+        service_type = None
+        if 'redhatvm' in cr_file.lower():
+            service_type = 'redhatvm'
+        elif 'windowsvm' in cr_file.lower() or 'windows-server' in cr_file.lower():
+            service_type = 'windowsvm'
+        elif 'mssql' in cr_file.lower():
+            service_type = 'mssql'
+        
+        if service_type:
+            # Check if any related resources still exist
+            self.add_log_line(f"🔍 Checking for remaining {service_type} resources...")
+            
+            try:
+                # Check for CRs of this type
+                resource_name = f"{service_type}s" if service_type != 'mssql' else 'mssqlservers'
+                result = subprocess.run([
+                    'kubectl', 'get', resource_name, '-o', 'name'
+                ], capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    remaining = result.stdout.strip().split('\n')
+                    self.add_log_line(f"📋 Found {len(remaining)} remaining {service_type} resource(s)")
+                    for resource in remaining[:3]:  # Show first 3
+                        self.add_log_line(f"  🔸 {resource}")
+                else:
+                    self.add_log_line(f"✅ No remaining {service_type} resources found")
+                    
+            except subprocess.TimeoutExpired:
+                self.add_log_line(f"⏰ Resource check timed out")
+            except Exception as e:
+                self.add_log_line(f"⚠️ Could not check remaining resources: {e}")
+        
+        # Check for any deletion-related logs in operator pods
+        self.add_log_line(f"📋 Checking operator logs for deletion confirmation...")
+        try:
+            result = subprocess.run([
+                'kubectl', 'logs', '-l', 'app.kubernetes.io/name=kopf',
+                '--tail=5', '--since=30s'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                logs = result.stdout.strip().split('\n')
+                deletion_logs = [log for log in logs if 'delet' in log.lower() or 'remov' in log.lower()]
+                if deletion_logs:
+                    self.add_log_line(f"📰 Recent operator deletion activity:")
+                    for log in deletion_logs[-2:]:  # Last 2 deletion logs
+                        self.add_log_line(f"  📄 {log}")
+                else:
+                    self.add_log_line(f"📭 No recent deletion activity in operator logs")
+            else:
+                self.add_log_line(f"⚠️ Could not retrieve operator logs")
+                
+        except subprocess.TimeoutExpired:
+            self.add_log_line(f"⏰ Operator log check timed out")
+        except Exception as e:
+            self.add_log_line(f"⚠️ Error checking operator logs: {e}")
+        
+        self.add_log_line(f"🏁 Operator monitoring completed for {cr_file}")
+        self.add_log_line(f"═══════════════════════════════════════════════════")
+
+    def cleanup_mssql_resources(self, cr_file):
+        """Cleanup MSSQL-specific resources after CR deletion"""
+        self.add_log_line(f"🗄️ Cleaning up MSSQL resources for {cr_file}...")
+        # Add MSSQL-specific cleanup logic here
+        self.add_log_line("💾 Checking for persistent volumes...")
+        self.add_log_line("🔐 Checking for secrets and config maps...")
+
+    def cleanup_otel_resources(self, cr_file):
+        """Cleanup OpenTelemetry-specific resources after CR deletion"""
+        self.add_log_line(f"📊 Cleaning up OTel resources for {cr_file}...")
+        # Add OTel-specific cleanup logic here
+        self.add_log_line("📈 Checking for collector pods...")
+        self.add_log_line("⚙️ Checking for configuration...")
+    
+    def handle_dynamic_delete_selection(self, service_key):
+        
+        folder = '/root/kubernetes-installer/manifest-controller'
+        if not os.path.exists(folder):
+            self.add_log_line(f"❌ manifest-controller folder not found: {folder}")
             return
             
-        # Create menu items for CRs
-        menu_items = []
-        for name, cr_data, status in cr_options:
-            # Determine icon based on status
-            if "Ready" in status:
-                icon = "✅"
-            elif "Already" in status or "Deployed" in status:
-                icon = "🔄"
-            elif "Unknown" in status:
-                icon = "🔴"
-            elif "Disabled" in status:
-                icon = "⏸️"
-            else:
-                icon = "📝"
-                
-            # Create button text
-            button_text = f"{icon} {name}\n   {status}"
-            
-            
-            # Create custom button that DEFINITELY handles Enter key
-            class CRButton(urwid.Button):
-                def __init__(self, label, cr_name, cr_data, callback, tui_instance):
-                    super().__init__(label)
-                    self.cr_name = cr_name
-                    self.cr_data = cr_data
-                    self.callback = callback
-                    self.tui = tui_instance
-                def keypress(self, size, key):
-                    if key in ('enter', ' '):
-                        self.tui.close_popup()
-                        self.callback(self.cr_name, self.cr_data)
-                        return
-                    if key == 'esc' or key == 'escape':
-                        self.tui.close_popup()
-                        # Reset menu state and popup_listbox as in global handler
-                        self.tui.menu_state = None
-                        self.tui.popup_listbox = None
-                        self.tui.reset_menu_state()
-                        return
-                    return super().keypress(size, key)
-            
-            button = CRButton(button_text, name, cr_data, callback, self)
-            button.cr_name = name
-            button.cr_data = cr_data
-            menu_items.append(urwid.AttrMap(button, 'button', 'button_focus'))
+        files = os.listdir(folder)
+        cr_files = [f for f in files if f.endswith('.yaml') and 'crd' not in f.lower()]
         
-        # Use standard ListBox - urwid will handle Enter key properly
+        if not cr_files:
+            self.add_log_line("❌ No CR files found in manifest-controller folder")
+            return
+
+        def handle_cr_delete_selection(cr_name, cr_path):
+            import subprocess
+            self.add_log_line(f"�️ Deleting CR: {cr_name}...")
+            
+            result = subprocess.run(['kubectl', 'delete', '-f', cr_path], capture_output=True, text=True)
+            if result.returncode == 0:
+                self.add_log_line(f"✅ CR deleted successfully: {cr_name}")
+            else:
+                err = result.stderr
+                if 'NotFound' in err and 'error when deleting' in err:
+                    self.add_log_line(f"⚠️ CR not found in cluster (already deleted): {cr_name}")
+                elif 'CRD' in err and 'not found' in err:
+                    self.add_log_line(f"⚠️ CRD not found for {cr_name}, but that's expected if CRDs aren't deployed")
+                else:
+                    self.add_log_line(f"❌ Failed to delete CR {cr_name}: {err}")
+
+        # Custom button class for ESC handling - same pattern as CRDButton
+        class CRButton(urwid.Button):
+            def __init__(self, label, cr_name, cr_path, callback, tui_instance):
+                super().__init__(label)
+                self.cr_name = cr_name
+                self.cr_path = cr_path
+                self.callback = callback
+                self.tui = tui_instance
+            def keypress(self, size, key):
+                if key in ('enter', ' '):
+                    self.tui.close_popup()
+                    self.callback(self.cr_name, self.cr_path)
+                    return
+                if key == 'esc' or key == 'escape':
+                    self.tui.close_popup()
+                    self.tui.menu_state = None
+                    self.tui.popup_listbox = None
+                    self.tui.reset_menu_state()
+                    return
+                return super().keypress(size, key)
+
+        menu_items = []
+        for cr_file in cr_files:
+            cr_path = os.path.join(folder, cr_file)
+            btn = CRButton(f"CR: {cr_file}", cr_file, cr_path, handle_cr_delete_selection, self)
+            menu_items.append(urwid.AttrMap(btn, 'button', 'button_focus'))
+
+        walker = urwid.SimpleFocusListWalker(menu_items)
+        listbox = urwid.ListBox(walker)
+        popup_content = urwid.Pile([
+            urwid.Text(('header', 'Delete CRs - Select to Delete'), align='center'),
+            urwid.Divider(),
+            urwid.BoxAdapter(listbox, height=len(menu_items) + 2),
+            urwid.Divider(),
+            urwid.Text("Use ↑↓ arrows and Enter to delete, ESC to cancel", align='center')
+        ])
+        dialog = urwid.LineBox(popup_content, title="Delete CRs")
+        overlay = urwid.Overlay(
+            dialog,
+            self.main_frame,
+            align='center',
+            width=60,
+            valign='middle',
+            height=len(menu_items) + 8
+        )
+        self.original_widget = self.loop.widget
+        self.loop.widget = overlay
+        self.menu_state = 'cr_delete_popup'
+        self.popup_listbox = listbox
+    
+    def handle_dynamic_delete_selection(self, service_key):
+        """Handle dynamically discovered service selection for delete (COPY OF APPLY VERSION)"""
+        if not hasattr(self, 'dynamic_service_categories') or not hasattr(self, 'dynamic_service_options'):
+            self.add_log_line("❌ No dynamic service data available")
+            return
+        
+        try:
+            key_index = int(service_key) - 1
+            if key_index < 0 or key_index >= len(self.dynamic_service_options):
+                self.add_log_line(f"❌ Invalid service selection: {service_key}")
+                return
+            
+            selected_option = self.dynamic_service_options[key_index]
+            service_name = selected_option[1]  # Get the service name
+            
+            # Find the corresponding category
+            selected_category = None
+            for category, info in self.dynamic_service_categories.items():
+                if info['name'] == service_name:
+                    selected_category = category
+                    break
+            
+            if not selected_category:
+                self.add_log_line(f"❌ Could not find category for {service_name}")
+                return
+            
+            category_info = self.dynamic_service_categories[selected_category]
+            crs = category_info['crs']
+            
+            self.add_log_line(f"🗑️ Selected: Delete {service_name} ({len(crs)} CRs)")
+            
+            # Show CR selection popup with actual CRs
+            cr_options = []
+            for cr_info in crs:
+                cr_name = cr_info['name']
+                cr_file = cr_info['file']
+                status_text = f"File: {cr_file} | Kind: {cr_info['kind']}"
+                cr_options.append((cr_name, cr_info, status_text))
+            
+            def handle_dynamic_cr_delete_selection(cr_name, cr_info, status=None):
+                self.execute_dynamic_cr_delete(cr_name, cr_info)
+            
+            self.show_unified_selection_popup(
+                f"Delete {service_name} CRs",
+                cr_options,
+                handle_dynamic_cr_delete_selection
+            )
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error in dynamic delete selection: {e}")
+    
+    def execute_dynamic_cr_delete(self, cr_name, cr_info):
+        """Execute CR deletion for dynamically discovered CR"""
+        import os
+        self.add_log_line(f"�️ Deleting {cr_name} from {cr_info['file']}...")
+        
+        try:
+            cr_file_path = cr_info['path']
+            if not os.path.exists(cr_file_path):
+                self.add_log_line(f"❌ CR file not found: {cr_file_path}")
+                return
+            
+            # Delete the CR from cluster
+            import subprocess
+            result = subprocess.run(['kubectl', 'delete', '-f', cr_file_path], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Custom Resource deleted successfully: {cr_info['file']}")
+            else:
+                err = result.stderr
+                if 'NotFound' in err and 'error when deleting' in err:
+                    self.add_log_line(f"⚠️ CR not found in cluster (already deleted or never applied): {cr_name}")
+                elif 'CRD' in err and 'not found' in err:
+                    self.add_log_line(f"⚠️ CRD not found for {cr_name}, but that's expected if CRDs aren't deployed")
+                else:
+                    self.add_log_line(f"❌ Failed to delete CR {cr_name}: {err}")
+                    
+        except Exception as e:
+            self.add_log_line(f"❌ Deletion failed for {cr_name}: {str(e)}")
+        
+        self.menu_state = 'main'
+
+    def show_unified_selection_popup(self, title, options, callback):
+        """Unified popup for all menu selections - works for CRs, CRDs, services, etc."""
+        if not options:
+            return
+            
+        # Create universal button class that handles all cases
+        class UniversalButton(urwid.Button):
+            def __init__(self, label, option_data, callback, tui_instance):
+                super().__init__(label)
+                self.option_data = option_data  # Can be any data structure
+                self.callback = callback
+                self.tui = tui_instance
+                
+            def keypress(self, size, key):
+                if key in ('enter', ' '):
+                    self.tui.add_log_line(f"🔥 UniversalButton ENTER: {type(self.option_data)} = {self.option_data}")
+                    self.tui.close_popup()
+                    # Call callback with the stored option data
+                    if isinstance(self.option_data, tuple):
+                        # Unpack tuple data (for CR/CRD cases)
+                        self.tui.add_log_line(f"🔥 Calling callback with tuple: {self.option_data}")
+                        self.callback(*self.option_data)
+                    else:
+                        # Single value (for service cases)
+                        self.tui.add_log_line(f"🔥 Calling callback with single value: {self.option_data}")
+                        self.callback(self.option_data)
+                    return None
+                    
+                if key in ('esc', 'escape'):
+                    self.tui.close_popup()
+                    self.tui.menu_state = None
+                    self.tui.popup_listbox = None
+                    self.tui.reset_menu_state()
+                    return None
+                    
+                return super().keypress(size, key)
+        
+        # Create menu items
+        menu_items = []
+        for option in options:
+            if isinstance(option, tuple) and len(option) >= 3:
+                # CR/CRD format: (name, data, status) or (key, title, icon, description)
+                if len(option) == 4:
+                    # Service format: (key, title, icon, description)
+                    key, title, icon, description = option
+                    button_text = f"{icon} {title}\n   {description}"
+                    option_data = key
+                else:
+                    # CR/CRD format: (name, data, status)
+                    name, data, status = option
+                    # Determine icon based on status
+                    if "Ready" in status:
+                        icon = "✅"
+                    elif "Already" in status or "Deployed" in status:
+                        icon = "🔄"
+                    elif "Unknown" in status:
+                        icon = "🔴"
+                    elif "Disabled" in status:
+                        icon = "⏸️"
+                    else:
+                        icon = "📝"
+                    button_text = f"{icon} {name}\n   {status}"
+                    option_data = (name, data, status)
+            else:
+                # Simple string option
+                button_text = str(option)
+                option_data = option
+            
+            button = UniversalButton(button_text, option_data, callback, self)
+            button_widget = urwid.AttrMap(button, 'button', 'button_focus')
+            menu_items.append(button_widget)
+        
+        # Create listbox
         menu_walker = urwid.SimpleListWalker(menu_items)
         menu_listbox = urwid.ListBox(menu_walker)
-        # Ensure focus is set to the first item so Enter works
         if len(menu_walker) > 0:
             menu_listbox.focus_position = 0
         
-        # Create simple popup content
+        # Create popup content
         popup_content = urwid.Pile([
             urwid.Text(('popup_title', f"🔽 {title}"), align='center'),
             urwid.Divider('─'),
-            urwid.BoxAdapter(menu_listbox, height=min(len(menu_items), 6)),
+            urwid.BoxAdapter(menu_listbox, height=min(len(menu_items), 8)),
             urwid.Divider('─'),
-            urwid.Text("↑↓: Navigate, Enter: Select, 1: Quick Select First, ESC: Cancel", align='center')
+            urwid.Text("↑↓: Navigate, Enter: Select, ESC: Cancel", align='center')
         ])
         
         popup_box = urwid.AttrMap(urwid.LineBox(popup_content, title=title), 'popup')
@@ -644,21 +1240,18 @@ class WindowsServicesTUI:
             popup_box,
             self.main_frame,
             align='center', width=60,
-            valign='middle', height=min(len(menu_items) + 8, 16)  # Add more space for proper rendering
+            valign='middle', height=min(len(menu_items) + 8, 16)
         )
         
         self.popup = overlay
-        self.popup_callback = callback  # Store callback for keyboard handling
-        self.popup_listbox = menu_listbox  # Store listbox reference for Enter handling
+        self.popup_callback = callback
+        self.popup_listbox = menu_listbox
         
-        # Store original widget before showing popup
+        # Store original widget
         if not hasattr(self, 'original_widget') or not self.original_widget:
             self.original_widget = self.loop.widget
         
-        # Set menu state for CR popup
-        self.menu_state = 'cr_popup'
-        
-        # Show popup
+        self.menu_state = 'unified_popup'
         self.loop.widget = overlay
     
     def show_service_selection_popup(self, action_title, service_options, callback):
@@ -737,7 +1330,8 @@ class WindowsServicesTUI:
     
     def close_popup(self):
         """Close the current popup and return to main interface"""
-        if hasattr(self, 'original_widget') and self.original_widget:
+        if hasattr(self, 'original_widget') and self.original_widget and hasattr(self, 'loop'):
+            self.add_log_line("🚪 Closing popup and returning to main interface")
             self.loop.widget = self.original_widget
             self.original_widget = None
             self.popup_callback = None
@@ -746,26 +1340,90 @@ class WindowsServicesTUI:
             self.popup_listbox = None
             self.popup = None  # Clear popup reference
             self.menu_state = None
-            self.add_log_line("📋 Popup closed")
+            self.add_log_line("📋 Popup closed successfully")
     
-    def handle_install_selection(self, service_key):
-        """Handle install service selection"""
-        service_map = {
-            '1': ('vms', 'Windows VMs'),
-            '2': ('mssql', 'MSSQL Services'),
-            '3': ('otel', 'OpenTelemetry Services')
-        }
+    def handle_dynamic_install_selection(self, service_key):
+        """Handle dynamically discovered service selection for install"""
+        if not hasattr(self, 'dynamic_service_categories') or not hasattr(self, 'dynamic_service_options'):
+            self.add_log_line("❌ No dynamic service data available")
+            return
         
-        if service_key in service_map:
-            service_type, service_name = service_map[service_key]
-            self.add_log_line(f"🚀 Selected: Install {service_name}")
-            # Go directly to CR selection for install
-            self.show_cr_selection_for_install(service_type, service_name)
+        try:
+            key_index = int(service_key) - 1
+            if key_index < 0 or key_index >= len(self.dynamic_service_options):
+                self.add_log_line(f"❌ Invalid service selection: {service_key}")
+                return
+            
+            selected_option = self.dynamic_service_options[key_index]
+            service_name = selected_option[1]  # Get the service name
+            
+            # Find the corresponding category
+            selected_category = None
+            for category, info in self.dynamic_service_categories.items():
+                if info['name'] == service_name:
+                    selected_category = category
+                    break
+            
+            if not selected_category:
+                self.add_log_line(f"❌ Could not find category for {service_name}")
+                return
+            
+            category_info = self.dynamic_service_categories[selected_category]
+            crs = category_info['crs']
+            
+            self.add_log_line(f"🚀 Selected: Install {service_name} ({len(crs)} CRs)")
+            
+            # Show CR selection popup with actual CRs
+            cr_options = []
+            for cr_info in crs:
+                cr_name = cr_info['name']
+                cr_file = cr_info['file']
+                status_text = f"File: {cr_file} | Kind: {cr_info['kind']}"
+                cr_options.append((cr_name, cr_info, status_text))
+            
+            def handle_dynamic_cr_install_selection(cr_name, cr_info, status=None):
+                self.execute_dynamic_cr_install(cr_name, cr_info)
+            
+            self.show_unified_selection_popup(
+                f"Install {service_name} CRs",
+                cr_options,
+                handle_dynamic_cr_install_selection
+            )
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error in dynamic install selection: {e}")
+    
+    def execute_dynamic_cr_install(self, cr_name, cr_info):
+        """Execute CR installation for dynamically discovered CR"""
+        import os
+        self.add_log_line(f"🚀 Installing {cr_name} from {cr_info['file']}...")
+        
+        try:
+            cr_file_path = cr_info['path']
+            if not os.path.exists(cr_file_path):
+                self.add_log_line(f"❌ CR file not found: {cr_file_path}")
+                return
+            
+            # Apply the CR file directly
+            import subprocess
+            result = subprocess.run(['kubectl', 'apply', '-f', cr_file_path], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Custom Resource applied successfully: {cr_info['file']}")
+                self.add_log_line(f"⏳ Waiting for operator to process CR and run playbook...")
+                self.add_log_line(f"💡 Kind: {cr_info['kind']} | Name: {cr_name}")
+            else:
+                self.add_log_line(f"❌ Failed to apply CR {cr_name}: {result.stderr}")
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Installation failed for {cr_name}: {str(e)}")
+        
+        self.menu_state = 'main'
     
     def handle_uninstall_selection(self, service_key):
         """Handle uninstall service selection"""
         service_map = {
-            '1': ('vms', 'Windows VMs'),
+            '1': ('vms', 'Virtual Machines'),
             '2': ('mssql', 'MSSQL Services'), 
             '3': ('otel', 'OpenTelemetry Services')
         }
@@ -802,7 +1460,7 @@ class WindowsServicesTUI:
                     def handle_cr_install_selection(cr_name, cr_data):
                         self.add_log_line(f"🎯 handle_cr_install_selection called with CR: {cr_name}")
                         self.execute_cr_install(service_type, service_name, cr_name, cr_data)
-                    self.show_cr_selection_popup(
+                    self.show_unified_selection_popup(
                         f"Install {service_name} CR",
                         crs_to_show,
                         handle_cr_install_selection
@@ -843,7 +1501,7 @@ class WindowsServicesTUI:
                     if uninstallable_crs:
                         def handle_cr_uninstall_selection(cr_name, cr_data):
                             self.execute_cr_uninstall(service_type, service_name, cr_name, cr_data)
-                        self.show_cr_selection_popup(
+                        self.show_unified_selection_popup(
                             f"Uninstall {service_name} CR", 
                             uninstallable_crs, 
                             handle_cr_uninstall_selection
@@ -889,7 +1547,7 @@ class WindowsServicesTUI:
                             """Handle CR selection for apply"""
                             self.execute_cr_apply(service_type, service_name, cr_name, cr_data)
                         
-                        self.show_cr_selection_popup(
+                        self.show_unified_selection_popup(
                             f"Apply {service_name} CR", 
                             applicable_crs, 
                             handle_cr_apply_selection
@@ -906,18 +1564,82 @@ class WindowsServicesTUI:
         except Exception as e:
             self.add_log_line(f"❌ Error loading local CRs: {e}")
 
-    def handle_apply_selection(self, service_key):
-        """Handle apply CR service selection"""
-        service_map = {
-            '1': ('vms', 'WindowsVM'),
-            '2': ('mssql', 'MSSQL'),
-            '3': ('otel', 'OTel')
-        }
+    def handle_dynamic_apply_selection(self, service_key):
+        """Handle dynamically discovered service selection for apply"""
+        if not hasattr(self, 'dynamic_service_categories') or not hasattr(self, 'dynamic_service_options'):
+            self.add_log_line("❌ No dynamic service data available")
+            return
         
-        if service_key in service_map:
-            service_type, service_name = service_map[service_key]
-            self.add_log_line(f"📝 Selected: Apply {service_name} CRs")
-            self.show_cr_selection_for_apply(service_type, service_name)
+        try:
+            key_index = int(service_key) - 1
+            if key_index < 0 or key_index >= len(self.dynamic_service_options):
+                self.add_log_line(f"❌ Invalid service selection: {service_key}")
+                return
+            
+            selected_option = self.dynamic_service_options[key_index]
+            service_name = selected_option[1]  # Get the service name
+            
+            # Find the corresponding category
+            selected_category = None
+            for category, info in self.dynamic_service_categories.items():
+                if info['name'] == service_name:
+                    selected_category = category
+                    break
+            
+            if not selected_category:
+                self.add_log_line(f"❌ Could not find category for {service_name}")
+                return
+            
+            category_info = self.dynamic_service_categories[selected_category]
+            crs = category_info['crs']
+            
+            self.add_log_line(f"📝 Selected: Apply {service_name} ({len(crs)} CRs)")
+            
+            # Show CR selection popup with actual CRs
+            cr_options = []
+            for cr_info in crs:
+                cr_name = cr_info['name']
+                cr_file = cr_info['file']
+                status_text = f"File: {cr_file} | Kind: {cr_info['kind']}"
+                cr_options.append((cr_name, cr_info, status_text))
+            
+            def handle_dynamic_cr_apply_selection(cr_name, cr_info, status=None):
+                self.execute_dynamic_cr_apply(cr_name, cr_info)
+            
+            self.show_unified_selection_popup(
+                f"Apply {service_name} CRs",
+                cr_options,
+                handle_dynamic_cr_apply_selection
+            )
+            
+        except Exception as e:
+            self.add_log_line(f"❌ Error in dynamic apply selection: {e}")
+    
+    def execute_dynamic_cr_apply(self, cr_name, cr_info):
+        """Execute CR application for dynamically discovered CR"""
+        import os
+        self.add_log_line(f"📝 Applying {cr_name} from {cr_info['file']}...")
+        
+        try:
+            cr_file_path = cr_info['path']
+            if not os.path.exists(cr_file_path):
+                self.add_log_line(f"❌ CR file not found: {cr_file_path}")
+                return
+            
+            # Apply the CR file directly
+            import subprocess
+            result = subprocess.run(['kubectl', 'apply', '-f', cr_file_path], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                self.add_log_line(f"✅ Custom Resource applied successfully: {cr_info['file']}")
+                self.add_log_line(f"⏳ Kind: {cr_info['kind']} | Name: {cr_name}")
+            else:
+                self.add_log_line(f"❌ Failed to apply CR {cr_name}: {result.stderr}")
+                
+        except Exception as e:
+            self.add_log_line(f"❌ Application failed for {cr_name}: {str(e)}")
+        
+        self.menu_state = 'main'
     
     def handle_delete_selection(self, service_key):
         """Handle delete CR service selection"""
@@ -1266,52 +1988,37 @@ class WindowsServicesTUI:
         self.pending_action = None
         self.selected_method = None
     
-    def delete_cr_menu(self, button):
-        """Show submenu with all local CR YAMLs for deletion (no method selection)"""
-        import os
-        folder = '/root/kubernetes-installer/manifest-controller'
-        files = os.listdir(folder)
-        cr_files = [f for f in files if f.endswith('.yaml') and 'crd' not in f.lower()]
-        if cr_files:
-            cr_options = []
-            for fname in cr_files:
-                cr_path = os.path.join(folder, fname)
-                cr_options.append((fname, cr_path, 'Local CR YAML'))
-            def handle_cr_delete_selection(cr_name, cr_path, _status=None):
-                self.close_popup()
-                self.add_log_line(f"🗑️ Delete CR command sent for {cr_name}")
-                self.update_status_display()  # Force immediate status refresh
-                import subprocess
-                result = subprocess.run(['kubectl', 'delete', '-f', cr_path], capture_output=True, text=True)
+    def delete_crd_menu(self, button):
+        """Show a menu to delete CRD YAMLs from manifest-controller"""
+        self.add_log_line(f"🗑️ delete_crd_menu called - starting delete CRD menu...")
+
+        def handle_crd_delete_selection(file_name, file_path):
+            self.add_log_line(f"🔥 DELETE CALLBACK TRIGGERED: {file_name}")
+            self.add_log_line(f"🗑️ Deleting CRD: {file_name}...")
+
+            # Use timeout for kubectl delete to prevent hanging
+            try:
+                result = subprocess.run(['kubectl', 'delete', '-f', file_path],
+                                        capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
-                    self.add_log_line(f"✅ Deleted CR: {cr_name}")
+                    self.add_log_line(f"✅ CRD deleted successfully: {file_name}")
                 else:
                     err = result.stderr
                     if 'NotFound' in err and 'error when deleting' in err:
-                        self.add_log_line(f"⚠️ CR not found in cluster (already deleted or never applied): {cr_name}")
-                    elif 'CRD' in err and 'not found' in err:
-                        pass  # Suppress CRD not found, skipping message
+                        self.add_log_line(f"⚠️ CRD not found in cluster (already deleted): {file_name}")
                     else:
-                        self.add_log_line(f"❌ Failed to delete CR {cr_name}: {err}")
-            def popup_callback(cr_name, cr_path, status=None):
-                handle_cr_delete_selection(cr_name, cr_path, status)
-            cr_options_for_popup = [(name, path, status) for (name, path, status) in cr_options]
-            self.show_cr_selection_popup(
-                f"Delete Local CR YAML",
-                cr_options_for_popup,
-                popup_callback
-            )
-        else:
-            self.add_log_line(f"❌ No local CR YAMLs found in manifest-controller")
-    
-    def fix_issues(self, button):
-        """Smart issue fixing"""
-        self.add_log_line("🔧 === FIX ISSUES (SMART) ===")
-        self.add_log_line("Analyzing system for common issues...")
-        self.add_log_line("• Orphaned VMs")
-        self.add_log_line("• Missing CRs")
-        self.add_log_line("• Service mismatches")
-        self.add_log_line("TODO: Implement smart issue detection")
+                        self.add_log_line(f"❌ Failed to delete CRD {file_name}: {err}")
+            except subprocess.TimeoutExpired:
+                self.add_log_line(f"⏰ kubectl delete timed out for {file_name}")
+
+        # Implement the logic to gather CRD files and show the menu
+        self.show_universal_menu(
+            "Delete CRDs - Select to Delete",
+            "CRD",
+            lambda filename: 'crd' in filename.lower(),
+            handle_crd_delete_selection,
+            "CRD: "
+        )
     
     def clear_logs(self, button):
         """Clear log display"""
@@ -1361,8 +2068,8 @@ class WindowsServicesTUI:
         
         # Always handle ESC: close popup or step back from any menu
         if key == 'escape':
-            if self.menu_state == 'cr_popup' and self.popup:
-                self.add_log_line("🔙 CR_POPUP: ESC pressed, closing popup and resetting menu state")
+            if self.menu_state == 'unified_popup' and self.popup:
+                self.add_log_line("🔙 UNIFIED_POPUP: ESC pressed, closing popup and resetting menu state")
                 self.close_popup()
                 if hasattr(self, 'original_widget'):
                     self.loop.widget = self.original_widget
@@ -1381,33 +2088,15 @@ class WindowsServicesTUI:
                 self.reset_menu_state()
                 return
         
-        # Handle CR popup selection
-        elif self.menu_state == 'cr_popup':
-            self.add_log_line(f"🔑 CR_POPUP: Key={key} received in unhandled_input!")
-            if key in ('1', '2', '3', '4', '5'):
-                # Handle number key shortcuts for CR selection
-                self.add_log_line(f"🔑 CR_POPUP: Number key {key} pressed!")
-                try:
-                    index = int(key) - 1  # Convert to 0-based index
-                    if hasattr(self, 'popup_listbox') and self.popup_listbox:
-                        if index < len(self.popup_listbox.body):
-                            # Get the button at the specified index
-                            button_widget = self.popup_listbox.body[index]
-                            if hasattr(button_widget, 'original_widget'):
-                                button = button_widget.original_widget
-                                if hasattr(button, 'cr_name') and hasattr(button, 'cr_data'):
-                                    self.add_log_line(f"🔥 Number shortcut selecting: {button.cr_name}")
-                                    cr_name = button.cr_name
-                                    cr_data = button.cr_data
-                                    self.close_popup()
-                                    if hasattr(self, 'popup_callback') and self.popup_callback:
-                                        self.popup_callback(cr_name, cr_data)
-                                    return
-                except Exception as e:
-                    self.add_log_line(f"❌ Error with number shortcut: {str(e)}")
-                return
-            # For all other keys (including arrows, Enter), let urwid handle them naturally
-            return  # Don't consume any other keys
+        # Handle unified popup selection
+        elif self.menu_state == 'unified_popup':
+            # For all keys (including arrows, Enter), let urwid handle them naturally
+            return  # Don't consume any keys
+        
+        # Handle universal menu selection  
+        elif self.menu_state == 'universal_menu':
+            # For all keys (including arrows, Enter), let urwid handle them naturally
+            return  # Don't consume any keys
         
         # Handle other popup types (already handled above)
         elif self.popup:
@@ -1476,17 +2165,17 @@ class WindowsServicesTUI:
         elif key == 'f2':
             # F2 - Show current tab status
             self.update_status_display()
-            self.add_log_line("📊 Status refreshed (F2)")
+            self.add_log_line("Status refreshed")
         elif key == 'f6':
-            # F6 - Install menu
-            self.install_menu(None)
+            # F6 - Apply CRDs menu
+            self.apply_crds_menu(None)
         elif key == 'f7':
             # F7 - Apply CR menu
             self.apply_cr_menu(None)
         elif key == 'f2':
             # F2 - Show current tab status
             self.update_status_display()
-            self.add_log_line("📊 Status refreshed (F2)")
+            self.add_log_line("Status refreshed")
         elif key == 'f3':
             # F3 - VMs tab
             self.show_vms_tab(None)
@@ -1497,8 +2186,8 @@ class WindowsServicesTUI:
             # F5 - OTel tab
             self.show_otel_tab(None)
         elif key == 'f6':
-            # F6 - Install menu
-            self.install_menu(None)
+            # F6 - Apply CRDs menu
+            self.apply_crds_menu(None)
         elif key == 'f7':
             # F7 - Apply CR menu
             self.apply_cr_menu(None)
@@ -1521,7 +2210,7 @@ class WindowsServicesTUI:
                 if key == 'left':
                     self.content_columns.focus_position = 0
                     self.update_focus_indicators()
-                    self.add_log_line("📊 Moved to Status Panel (←)")
+                    self.add_log_line("Moved to Status Panel")
                 else:
                     self.content_columns.focus_position = 1
                     self.update_focus_indicators()
@@ -1537,7 +2226,7 @@ class WindowsServicesTUI:
                 self.update_focus_indicators()
                 
                 if new_focus == 0:
-                    self.add_log_line("📊 Switched to Status Panel (Tab)")
+                    self.add_log_line("Switched to Status Panel")
                 else:
                     self.add_log_line("📜 Switched to Log Panel (Tab)")
             except Exception as e:
@@ -1633,12 +2322,12 @@ class WindowsServicesTUI:
                         self.add_log_line(f"✅ Deleted CR: {cr_name}")
                     else:
                         self.add_log_line(f"❌ Failed to delete CR {cr_name}: {result.stderr}")
-                # Wrap callback for show_cr_selection_popup
+                # Wrap callback for show_unified_selection_popup
                 def popup_callback(cr_name, cr_path, status=None):
                     handle_cr_delete_selection(cr_name, cr_path, status)
-                # Adapt to show_cr_selection_popup signature
+                # Adapt to show_unified_selection_popup signature
                 cr_options_for_popup = [(name, path, status) for (name, path, status) in cr_options]
-                self.show_cr_selection_popup(
+                self.show_unified_selection_popup(
                     f"Delete Local CR YAML",
                     cr_options_for_popup,
                     popup_callback
@@ -1791,16 +2480,10 @@ class WindowsServicesTUI:
         try:
             # Load initial status
             self.update_status_display()
-            self.add_log_line("📊 Initial status display loaded")
             
-            # Show startup summary
-            status_report = self.service_manager.get_comprehensive_status()
-            summary = status_report.get('summary', {})
-            
-            for service_type, service_summary in summary.items():
-                local_count = service_summary.get('local_count', 0)
-                deployed_count = service_summary.get('deployed_count', 0)
-                self.add_log_line(f"📈 {service_type.upper()}: {local_count} local, {deployed_count} deployed")
+        except Exception as e:
+            logger.error(f"Error during initial startup: {e}")
+            self.add_log_line(f"❌ Error during startup: {e}")
                 
         except Exception as e:
             self.add_log_line(f"⚠️ Error during startup: {e}")
@@ -1959,30 +2642,27 @@ class WindowsServicesTUI:
             self.add_log_line(f"❌ Application failed: {str(e)}")
     
     def force_key_handler(self, key):
-        """Forced key handler that logs everything and handles CR selection directly"""
-    # Removed verbose key log
+        """Forced key handler that logs everything and handles navigation"""
+        
+        # Debug: Log all keys when popup is open
+        if hasattr(self, 'popup') and self.popup is not None:
+            self.add_log_line(f"🔑 FORCE_KEY_HANDLER: key='{key}' menu_state='{self.menu_state}'")
         
         # Check if we have a popup open (regardless of menu_state)
         has_popup = hasattr(self, 'popup') and self.popup is not None
         
-        if has_popup and key == '1':
-            # Force close popup and trigger installation
-            self.close_popup()
-            # Call execute_cr_install directly with windows2025v3
-            self.execute_cr_install('WindowsVM', 'Windows VMs', 'windows2025v3', {'action': 'install'})
-            return
-        
         # Handle ESC for any popup
         if has_popup and key == 'escape':
+            self.add_log_line("🚪 FORCE_KEY_HANDLER: ESC pressed, closing popup")
             self.close_popup()
-            return
+            return None
         
-        # For CR popups, let Enter key pass through to urwid for proper button handling
-        if self.menu_state == 'cr_popup' and key == 'enter':
-            # Don't consume the key, let it pass through to the widget
+        # For universal popups, let ALL keys pass through to widgets for proper button handling
+        if self.menu_state == 'universal_menu':
+            # Don't consume any keys, let them pass through to the widgets
             return key
         
-        # Call the original handler
+        # Call the original handler for other cases
         return self.unhandled_input(key)
 
     def run(self):
@@ -1995,11 +2675,8 @@ class WindowsServicesTUI:
         )
         
         # Welcome messages
-        self.add_log_line("=== Windows Services Management System Started ===")
-        self.add_log_line("🎯 Enhanced modular system with full functionality")
-        self.add_log_line("📊 Consolidated VMs/Services view - no more VMs taking all space!")
-        self.add_log_line("🔧 Use F-keys for quick actions, Tab/arrows for navigation")
-        self.add_log_line("⚡ Monitoring WindowsVM, MSSQL, and OpenTelemetry resources")
+        self.add_log_line("=== Intent Based Services Management System Started ===")
+        self.add_log_line(" Use F-keys for quick actions, Tab/arrows for navigation")
         
         # Load initial status and start updates
         self.loop.set_alarm_in(0.2, lambda loop, user_data: self.initial_startup())

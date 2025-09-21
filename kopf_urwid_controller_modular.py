@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modular Windows Services Management System
+Modular Intent Based Services Management System
 Main entry point for the Kopf + urwid TUI controller
 """
 
@@ -17,8 +17,7 @@ import psutil
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'modules'))
 
 # Import modular components
-from modules.tui_interface import WindowsServicesTUI
-from modules.kopf_handlers import setup_kopf_handlers
+from modules.tui_interface import KubernetesCRDTUI
 from modules.service_managers import ServiceManager
 from modules.utils.logging_config import setup_logging
 from modules.utils.k8s_client import load_kube_config
@@ -29,7 +28,7 @@ tui_app = None
 def run_kopf_operator():
     """Run the Kopf operator in a separate thread"""
     try:
-        load_kube_config()
+        # Config already loaded in main(), no need to reload
         # --- External variable parsing and override logic ---
         from modules.utils.var_helpers import get_var, EXTRA_VARS
 
@@ -37,18 +36,13 @@ def run_kopf_operator():
         logger.info("[OPERATOR] Starting Kopf operator thread...")
         print("[OPERATOR] Kopf operator thread starting...")
         
-        # Set up Kopf handlers for all resource types
-        setup_kopf_handlers()
-        logger.info("[OPERATOR] Kopf handlers set up.")
-        print("[OPERATOR] Kopf handlers set up.")
-        
-        # Run Kopf operator
+        # Import handlers so Kopf registers them
+        import modules.kopf_handlers
         import kopf
         logger.info("[OPERATOR] Running kopf.run()...")
         print("[OPERATOR] Running kopf.run()...")
         kopf.run(
-            clusterwide=False,
-            namespace=os.getenv('WATCH_NAMESPACE', 'default'),
+            clusterwide=True,
             standalone=True,
         )
     except Exception as e:
@@ -59,12 +53,10 @@ def run_kopf_operator():
 def run_kopf_operator_thread():
     """Run the Kopf operator in a background thread for the TUI."""
     def _run():
+        import modules.kopf_handlers
         import kopf
-        load_kube_config()
-        setup_kopf_handlers()
         kopf.run(
-            clusterwide=False,
-            namespace=os.getenv('WATCH_NAMESPACE', 'default'),
+            clusterwide=True,
             standalone=True,
         )
     t = threading.Thread(target=_run, daemon=True)
@@ -79,7 +71,7 @@ def main():
     setup_logging()
     logger = logging.getLogger(__name__)
     
-    logger.info("=== Windows Services Management System Starting ===")
+    logger.info("=== Intent Based Services Management System Starting ===")
     
     try:
         # Load Kubernetes config
@@ -99,7 +91,7 @@ def main():
 
 
         # Create TUI application
-        tui_app = WindowsServicesTUI(service_manager)
+        tui_app = KubernetesCRDTUI(service_manager)
 
         # Start TUI only (Kopf operator must be run as a separate process)
         logger.info("Starting TUI interface...")
@@ -111,7 +103,7 @@ def main():
         logger.error(f"Fatal error: {e}")
         raise
     finally:
-        logger.info("Shutting down Windows Services Management System")
+        logger.info("Shutting down Intent Based Services Management System")
 
 if __name__ == "__main__":
     main()

@@ -66,11 +66,6 @@ RESOURCES = {
     }
 }
 
-def setup_kopf_handlers():
-    """Set up all Kopf handlers for different resource types"""
-    log_event("Setting up Kopf handlers for Windows services...")
-
-
 # Configure Kopf persistence to reduce status conflicts
 @kopf.on.startup()
 def configure_kopf(settings: kopf.OperatorSettings, **_):

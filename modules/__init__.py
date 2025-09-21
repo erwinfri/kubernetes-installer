@@ -1,1 +1,1 @@
-# Windows Services Management System - Modules Package
+# Intent Based Services Management System - Modules Package

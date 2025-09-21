@@ -1,5 +1,5 @@
 """
-Logging configuration module for the Windows Services Management System
+Logging configuration module for the Intent Based Services Management System
 """
 
 import logging
