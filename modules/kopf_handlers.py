@@ -546,6 +546,9 @@ def handle_redhatvm(body, meta, spec, status, namespace, diff, old, new, patch, 
             'vm_image': vm_image,
             'vm_cpu_cores': vm_cpu_cores,
             'vm_memory': vm_memory,
+            'system_disk_size': get_var('system_disk_size', spec, '20Gi'),
+            'storage_dir': get_var('storage_dir', spec, '/data/vms'),
+            'qcow2_image_path': get_var('qcow2_image_path', spec, './rhel-9.6-x86_64-kvm.qcow2'),
             'root_password': root_password,
             'user_password': user_password,
             'subscription_username': subscription_username,
@@ -630,3 +633,162 @@ def delete_redhatvm(body, meta, spec, status, namespace, patch, **kwargs):
         log_event(f"[OPERATOR] Uninstall playbook completed for Red Hat VM {vm_name}")
     else:
         log_event(f"[OPERATOR] Uninstall playbook failed for Red Hat VM {vm_name}: {result.get('error')}")
+
+
+# OracleDB Handlers (Oracle Database Service on existing VMs)
+@kopf.on.create('infra.example.com', 'v1', 'oracledbs')
+@kopf.on.update('infra.example.com', 'v1', 'oracledbs')
+def handle_oracledb(body, meta, spec, status, namespace, diff, old, new, patch, **kwargs):
+    """Handle Oracle DB service installation on existing VMs"""
+    terminal_phases = ['Ready', 'Failed', 'Skipped']
+    if status and status.get('phase') in terminal_phases and status.get('observedGeneration') == meta.get('generation'):
+        msg = f"[OPERATOR] Skipping execution for {meta.get('name')} (phase={status.get('phase')})"
+        log_event(msg)
+        patch.status['phase'] = status.get('phase')
+        patch.status['message'] = status.get('message', '')
+        patch.status['observedGeneration'] = status.get('observedGeneration')
+        return
+    
+    log_event("[OPERATOR] handle_oracledb triggered!")
+    name = meta.get('name')
+    action = get_var('action', spec, 'install')
+    vm_name = get_var('vm_name', spec, name)
+    kubevirt_namespace = get_var('kubevirt_namespace', spec, namespace)
+    oracle_vault_secret = get_var('oracle_vault_secret', spec, 'secret/data/oracle-vm/admin')
+    oracle_user = get_var('oracle_user', spec, 'oracle')
+    oracle_password = get_var('oracle_password', spec, 'Oracle123')
+    oracle_admin_password = get_var('oracle_admin_password', spec, 'Oracle123')
+    oracle_sid = get_var('oracle_sid', spec, 'FREE')
+    oracle_home = get_var('oracle_home', spec, '/opt/oracle/product/23ai/dbhomeFree')
+    oracle_port = get_var('oracle_port', spec, 1521)
+    
+    log_event(f"[OPERATOR] Oracle DB CR received: name={name}, action={action}, vm_name={vm_name}")
+    
+    try:
+        patch.status['phase'] = 'InProgress'
+        patch.status['message'] = f"Oracle DB {action} in progress on VM {vm_name}"
+        patch.status['reason'] = 'Processing'
+        patch.status['observedGeneration'] = meta.get('generation')
+        now = datetime.utcnow().isoformat() + 'Z'
+        cond = {
+            'type': 'Ready',
+            'status': 'False',
+            'reason': 'Processing',
+            'message': f"Oracle DB {action} in progress on VM {vm_name}",
+            'lastTransitionTime': now,
+        }
+        existing = status.get('conditions', []) if status else []
+        patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+    except Exception:
+        pass
+
+    try:
+        kopf.info(body, reason='Processing', message=f'Starting Oracle DB {action} on VM {vm_name}')
+        playbook_path = "/root/kubernetes-installer/oracle-controller.yaml"
+        playbook_vars = {
+            'action': action,
+            'vm_name': vm_name,
+            'kubevirt_namespace': kubevirt_namespace,
+            'oracle_vault_secret': oracle_vault_secret,
+            'oracle_user': oracle_user,
+            'oracle_password': oracle_password,
+            'oracle_admin_password': oracle_admin_password,
+            'oracle_sid': oracle_sid,
+            'oracle_home': oracle_home,
+            'oracle_port': oracle_port,
+        }
+        
+        log_event(f"[OPERATOR] Running Oracle DB playbook for {action} on VM {vm_name}")
+        result = run_ansible_playbook(playbook_path, playbook_vars)
+        
+        if result['success']:
+            log_event(f"[OPERATOR] Playbook succeeded for Oracle DB {action} on VM {vm_name}")
+            patch.status['phase'] = 'Ready'
+            patch.status['message'] = f"Oracle DB {action} completed successfully on VM {vm_name}"
+            patch.status['reason'] = 'Completed'
+            patch.status['observedGeneration'] = meta.get('generation')
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'True',
+                'reason': 'Completed',
+                'message': f"Oracle DB {action} completed successfully on VM {vm_name}",
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
+        else:
+            log_event(f"[OPERATOR] Playbook failed for Oracle DB {action} on VM {vm_name}: {result['error']}")
+            patch.status['phase'] = 'Failed'
+            patch.status['message'] = f"Oracle DB {action} failed on VM {vm_name}: {result['error']}"
+            patch.status['reason'] = 'Failed'
+            patch.status['observedGeneration'] = meta.get('generation')
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'False',
+                'reason': 'Failed',
+                'message': f"Oracle DB {action} failed on VM {vm_name}",
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
+    
+    except Exception as e:
+        error_message = str(e)
+        log_event(f"[OPERATOR] Error processing Oracle DB CR: {error_message}")
+        try:
+            kopf.exception(body, reason='Error', message=error_message)
+        except Exception as patch_err:
+            log_event(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
+        patch.status['phase'] = 'Failed'
+        patch.status['message'] = f"Oracle DB operation failed: {error_message}"
+        patch.status['reason'] = 'Error'
+        patch.status['observedGeneration'] = meta.get('generation')
+        return
+
+
+@kopf.on.delete('infra.example.com', 'v1', 'oracledbs')
+def delete_oracledb(body, meta, spec, status, namespace, patch, **kwargs):
+    """Handle Oracle DB service deletion"""
+    name = meta.get('name')
+    vm_name = get_var('vm_name', spec, name)
+    kubevirt_namespace = get_var('kubevirt_namespace', spec, namespace)
+    oracle_vault_secret = get_var('oracle_vault_secret', spec, 'secret/data/oracle-vm/admin')
+    oracle_user = get_var('oracle_user', spec, 'oracle')
+    oracle_password = get_var('oracle_password', spec, 'Oracle123')
+    oracle_admin_password = get_var('oracle_admin_password', spec, 'Oracle123')
+    
+    log_event(f"[OPERATOR] Oracle DB CR deletion triggered: {name}")
+    patch.status['phase'] = 'Terminating'
+    patch.status['message'] = f"Delete requested for Oracle DB on VM {vm_name}"
+    patch.status['reason'] = 'DeleteRequested'
+    patch.status['observedGeneration'] = meta.get('generation')
+
+    try:
+        kopf.info(body, reason='Cleanup', message=f'Starting Oracle DB cleanup on VM {vm_name}')
+        playbook_path = "/root/kubernetes-installer/oracle-controller.yaml"
+        playbook_vars = {
+            'action': 'uninstall',
+            'vm_name': vm_name,
+            'kubevirt_namespace': kubevirt_namespace,
+            'oracle_vault_secret': oracle_vault_secret,
+            'oracle_user': oracle_user,
+            'oracle_password': oracle_password,
+            'oracle_admin_password': oracle_admin_password,
+        }
+        
+        log_event(f"[OPERATOR] Running Oracle DB cleanup for VM {vm_name}")
+        result = run_ansible_playbook(playbook_path, playbook_vars)
+        
+        if result['success']:
+            log_event(f"[OPERATOR] Oracle DB cleanup succeeded for VM {vm_name}")
+        else:
+            log_event(f"[OPERATOR] Oracle DB cleanup failed for VM {vm_name}: {result.get('error')}")
+    
+    except Exception as e:
+        error_message = str(e)
+        log_event(f"[OPERATOR] Error during Oracle DB cleanup: {error_message}")
+

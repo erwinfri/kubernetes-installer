@@ -1,0 +1,82 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: oracledbs.infra.example.com
+spec:
+  group: infra.example.com
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              action:
+                type: string
+                default: install
+                enum: ["install", "uninstall", "status"]
+              vm_name:
+                type: string
+                description: "Target VM name for Oracle DB installation"
+              kubevirt_namespace:
+                type: string
+                default: default
+              oracle_vault_secret:
+                type: string
+                default: secret/data/oracle-vm/admin
+              oracle_user:
+                type: string
+                default: oracle
+              oracle_password:
+                type: string
+                default: Oracle123
+              oracle_admin_password:
+                type: string
+                default: Oracle123
+              oracle_sid:
+                type: string
+                default: FREE
+              oracle_home:
+                type: string
+                default: /opt/oracle/product/23ai/dbhomeFree
+              oracle_port:
+                type: integer
+                default: 1521
+            required:
+            - vm_name
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum: ["Pending", "InProgress", "Ready", "Failed"]
+              message:
+                type: string
+              reason:
+                type: string
+              observedGeneration:
+                type: integer
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    reason:
+                      type: string
+                    message:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+  scope: Namespaced
+  names:
+    plural: oracledbs
+    singular: oracledb
+    kind: OracleDB

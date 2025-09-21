@@ -15,3 +15,11 @@ archive/
 *.env
 *.local
 .DS_Store
+*.qcow2
+*.img
+*.raw
+*.bin
+*.cache
+*.out
+*.o
+*.txt

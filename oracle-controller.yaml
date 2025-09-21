@@ -1,0 +1,22 @@
+---
+- name: Oracle Database Service Controller
+  hosts: localhost
+  gather_facts: no
+  vars:
+    action: "{{ action | default('status') }}"
+    kind: "{{ kind | default('VirtualMachine') }}"
+    vm_name: "{{ vm_name | default('oracle-vm') }}"
+  tasks:
+    - name: Set playbook path based on action
+      set_fact:
+        playbook_path: >-
+          {% if action == 'install' %}
+            oracle/oracle-db-install.yaml
+          {% elif action == 'uninstall' %}
+            oracle/oracle-db-uninstall.yaml
+          {% else %}
+            oracle/oracle-db-status.yaml
+          {% endif %}
+
+    - name: Include the correct playbook
+      include_tasks: "{{ playbook_path }}"

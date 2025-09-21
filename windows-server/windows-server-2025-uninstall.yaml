@@ -199,26 +199,46 @@
 
 - name: Remove storage data
   block:
-    - name: Check storage directories
+    - name: Check storage directories and disk images
       ansible.builtin.stat:
         path: "{{ item }}"
-      register: storage_dirs
+      register: storage_items
       loop:
         - "{{ storage_dir }}/{{ vm_name }}-system-disk"
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk/disk.img"
         - "{{ storage_dir }}/{{ vm_name }}-installer"
+        - "{{ storage_dir }}/{{ vm_name }}-installer/disk.img"
         - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
         - "{{ storage_dir }}/Autounattend.xml"
+        - "{{ storage_dir }}/Install-VirtIO.ps1"
+        - "{{ storage_dir }}/SetupComplete.cmd"
 
     - name: Display storage cleanup information
       ansible.builtin.debug:
         msg:
-          - "🗂️  Storage directories to be removed:"
-          - "  {{ storage_dir }}/{{ vm_name }}-system-disk/ ({{ 'EXISTS' if storage_dirs.results[0].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/{{ vm_name }}-installer/ ({{ 'EXISTS' if storage_dirs.results[1].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/{{ vm_name }}-virtio-iso/ ({{ 'EXISTS' if storage_dirs.results[2].stat.exists else 'NOT FOUND' }})"
-          - "  {{ storage_dir }}/Autounattend.xml ({{ 'EXISTS' if storage_dirs.results[3].stat.exists else 'NOT FOUND' }})"
+          - "🗂️  Storage cleanup information:"
+          - "  System Disk Directory: {{ storage_dir }}/{{ vm_name }}-system-disk/ ({{ 'EXISTS' if storage_items.results[0].stat.exists else 'NOT FOUND' }})"
+          - "  System Disk Image: {{ storage_dir }}/{{ vm_name }}-system-disk/disk.img ({{ 'EXISTS' if storage_items.results[1].stat.exists else 'NOT FOUND' }})"
+          - "  Installer Directory: {{ storage_dir }}/{{ vm_name }}-installer/ ({{ 'EXISTS' if storage_items.results[2].stat.exists else 'NOT FOUND' }})"
+          - "  Installer Disk Image: {{ storage_dir }}/{{ vm_name }}-installer/disk.img ({{ 'EXISTS' if storage_items.results[3].stat.exists else 'NOT FOUND' }})"
+          - "  VirtIO ISO Directory: {{ storage_dir }}/{{ vm_name }}-virtio-iso/ ({{ 'EXISTS' if storage_items.results[4].stat.exists else 'NOT FOUND' }})"
+          - "  VirtIO ISO Image: {{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img ({{ 'EXISTS' if storage_items.results[5].stat.exists else 'NOT FOUND' }})"
+          - "  Autounattend.xml: {{ storage_dir }}/Autounattend.xml ({{ 'EXISTS' if storage_items.results[6].stat.exists else 'NOT FOUND' }})"
+          - "  Install-VirtIO.ps1: {{ storage_dir }}/Install-VirtIO.ps1 ({{ 'EXISTS' if storage_items.results[7].stat.exists else 'NOT FOUND' }})"
+          - "  SetupComplete.cmd: {{ storage_dir }}/SetupComplete.cmd ({{ 'EXISTS' if storage_items.results[8].stat.exists else 'NOT FOUND' }})"
 
-    - name: Remove storage directories and files automatically
+    - name: Remove individual disk image files first
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk/disk.img"
+        - "{{ storage_dir }}/{{ vm_name }}-installer/disk.img"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
+      register: disk_removal
+
+    - name: Remove storage directories and remaining files
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
@@ -227,10 +247,27 @@
         - "{{ storage_dir }}/{{ vm_name }}-installer"
         - "{{ storage_dir }}/{{ vm_name }}-virtio-iso"
         - "{{ storage_dir }}/Autounattend.xml"
+        - "{{ storage_dir }}/Install-VirtIO.ps1"
+        - "{{ storage_dir }}/SetupComplete.cmd"
+      register: directory_removal
+
+    - name: Verify disk images are removed
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: disk_verification
+      loop:
+        - "{{ storage_dir }}/{{ vm_name }}-system-disk/disk.img"
+        - "{{ storage_dir }}/{{ vm_name }}-installer/disk.img"
+        - "{{ storage_dir }}/{{ vm_name }}-virtio-iso/disk.img"
 
     - name: Display storage removal result
       ansible.builtin.debug:
-        msg: "📁 Storage data automatically removed"
+        msg:
+          - "📁 Storage cleanup completed:"
+          - "  System disk image removed: {{ 'YES' if not disk_verification.results[0].stat.exists else 'NO - STILL EXISTS' }}"
+          - "  Installer disk image removed: {{ 'YES' if not disk_verification.results[1].stat.exists else 'NO - STILL EXISTS' }}"
+          - "  VirtIO ISO removed: {{ 'YES' if not disk_verification.results[2].stat.exists else 'NO - STILL EXISTS' }}"
+          - "  All directories and files cleaned up successfully"
 
 - name: Verify cleanup
   block:

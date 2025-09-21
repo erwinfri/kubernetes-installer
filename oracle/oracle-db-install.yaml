@@ -1,0 +1,293 @@
+---
+
+- name: Oracle VM Install
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vm_name: "{{ vm_name | default('oracle-vm') }}"
+    kind: "{{ kind | default('VirtualMachine') }}"
+    action: "{{ action | default('install') }}"
+    kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
+    oracle_vault_secret: "{{ oracle_vault_secret | default('secret/data/oracle-vm/admin') }}"
+    oracle_user: "{{ oracle_user | default('oracle') }}"
+    oracle_password: "{{ oracle_password | default('Oracle123') }}"
+    oracle_admin_password: "{{ oracle_admin_password | default('Oracle123') }}"
+
+  pre_tasks:
+    - name: Set kubevirt_namespace default if not provided
+      ansible.builtin.set_fact:
+        kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
+
+    - name: Ensure port-forward script exists and is executable
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/library/start_portforward.sh"
+      register: portforward_script_stat
+
+    - name: Fail if port-forward script is missing or not executable
+      ansible.builtin.fail:
+        msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
+      when: not portforward_script_stat.stat.exists or not portforward_script_stat.stat.mode|int is search('7')
+
+    - name: Port-forward Vault service for local access
+      ansible.builtin.shell: |
+        ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
+        sleep 5
+      async: 10
+      poll: 0
+      register: port_forward_job
+
+    - name: Show Vault port-forward log for troubleshooting
+      ansible.builtin.shell: cat /tmp/vault-portforward.log || true
+      register: vault_portforward_log
+      changed_when: false
+      ignore_errors: true
+      tags: always
+
+    - name: Display Vault port-forward log output
+      ansible.builtin.debug:
+        var: vault_portforward_log.stdout
+      tags: always
+
+    - name: Wait for Vault API to be reachable on localhost:8200
+      ansible.builtin.wait_for:
+        host: localhost
+        port: 8200
+        delay: 2
+        timeout: 30
+        state: started
+      tags: always
+
+    # Set Vault environment variables for all Vault operations and CLI login
+    - name: Set Vault environment variables for Ansible and CLI
+      ansible.builtin.set_fact:
+        vault_env:
+          VAULT_ADDR: "http://localhost:8200"
+          VAULT_TOKEN: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
+        vault_addr: "http://localhost:8200"
+        vault_token: "{{ lookup('pipe', 'jq -r .root_token /root/vault-init.json') }}"
+      tags: always
+
+    # Read Oracle admin password from Vault
+    - name: Read Oracle admin password from Vault
+      ansible.builtin.shell: |
+        vault read -field=password {{ oracle_vault_secret }}
+      environment: "{{ vault_env }}"
+      register: vault_oracle_pw
+      changed_when: false
+      failed_when: false
+
+    - name: Set oracle_admin_password from Vault (if available)
+      ansible.builtin.set_fact:
+        oracle_admin_password: "{{ vault_oracle_pw.stdout | trim }}"
+      when: vault_oracle_pw.rc == 0 and vault_oracle_pw.stdout | trim | length > 0
+
+  tasks:
+    - name: Display Oracle VM installation information
+      ansible.builtin.debug:
+        msg:
+          - "🔮 Oracle VM Installation"
+          - "VM Name: {{ vm_name }}"
+          - "Namespace: {{ kubevirt_namespace }}"
+          - "Action: {{ action }}"
+          - "Oracle User: {{ oracle_user }}"
+          - "Vault Secret Path: {{ oracle_vault_secret }}"
+
+    - name: Handle Oracle VM actions
+      block:
+        - name: Install Oracle Database on target VM
+          block:
+            - name: Check if target VM exists and is running
+              kubernetes.core.k8s_info:
+                api_version: kubevirt.io/v1
+                kind: VirtualMachineInstance
+                name: "{{ vm_name }}"
+                namespace: "{{ kubevirt_namespace }}"
+              register: target_vmi
+
+            - name: Fail if target VM is not running
+              ansible.builtin.fail:
+                msg: "Target VM {{ vm_name }} is not running in namespace {{ kubevirt_namespace }}. Please ensure the VM is created and running before installing Oracle."
+              when: target_vmi.resources | length == 0 or target_vmi.resources[0].status.phase != "Running"
+
+            - name: Get VM IP address
+              ansible.builtin.set_fact:
+                vm_ip: "{{ target_vmi.resources[0].status.interfaces[0].ipAddress }}"
+              when: target_vmi.resources | length > 0 and target_vmi.resources[0].status.interfaces is defined
+
+            - name: Display VM connection info
+              ansible.builtin.debug:
+                msg:
+                  - "Target VM Information:"
+                  - "  Name: {{ vm_name }}"
+                  - "  Status: {{ target_vmi.resources[0].status.phase }}"
+                  - "  IP: {{ vm_ip | default('Not Available') }}"
+
+            - name: Wait for VM to be accessible via SSH
+              ansible.builtin.wait_for:
+                host: "{{ vm_ip }}"
+                port: 22
+                timeout: 300
+                delay: 10
+              when: vm_ip is defined
+
+            - name: Add VM to temporary inventory for Oracle installation
+              ansible.builtin.add_host:
+                name: "{{ vm_name }}"
+                ansible_host: "{{ vm_ip }}"
+                ansible_user: "{{ oracle_user }}"
+                ansible_password: "{{ oracle_admin_password }}"
+                ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                ansible_become: true
+                ansible_become_method: sudo
+                ansible_become_password: "{{ oracle_admin_password }}"
+              when: vm_ip is defined
+
+            - name: Install Oracle Database on target VM
+              delegate_to: "{{ vm_name }}"
+              block:
+                - name: Download Oracle preinstall RPM
+                  ansible.builtin.get_url:
+                    url: https://yum.oracle.com/repo/OracleLinux/OL9/appstream/x86_64/getPackage/oracle-database-preinstall-23ai-1.0-2.el9.x86_64.rpm
+                    dest: /tmp/oracle-database-preinstall-23ai-1.0-2.el9.x86_64.rpm
+                    mode: '0644'
+                    timeout: 300
+                  become: true
+
+                - name: Install Oracle preinstall RPM using dnf localinstall
+                  ansible.builtin.dnf:
+                    name: /tmp/oracle-database-preinstall-23ai-1.0-2.el9.x86_64.rpm
+                    state: present
+                    disable_gpg_check: yes
+                  become: true
+
+                - name: Download Oracle Database Free RPM
+                  ansible.builtin.get_url:
+                    url: https://download.oracle.com/otn-pub/otn_software/db-free/oracle-database-free-23ai-23.9-1.el9.x86_64.rpm
+                    dest: /tmp/oracle-database-free-23ai-23.9-1.el9.x86_64.rpm
+                    mode: '0644'
+                    timeout: 600
+                  become: true
+
+                - name: Install Oracle Database Free RPM using dnf localinstall
+                  ansible.builtin.dnf:
+                    name: /tmp/oracle-database-free-23ai-23.9-1.el9.x86_64.rpm
+                    state: present
+                    disable_gpg_check: yes
+                  become: true
+
+                - name: Configure Oracle Database environment
+                  ansible.builtin.shell: |
+                    echo 'export ORACLE_HOME=/opt/oracle/product/23ai/dbhomeFree' >> /home/oracle/.bash_profile
+                    echo 'export ORACLE_SID=FREE' >> /home/oracle/.bash_profile
+                    echo 'export PATH=$ORACLE_HOME/bin:$PATH' >> /home/oracle/.bash_profile
+                  become: true
+                  become_user: oracle
+
+                - name: Initialize Oracle Database
+                  ansible.builtin.shell: |
+                    source /home/oracle/.bash_profile
+                    /opt/oracle/product/23ai/dbhomeFree/bin/dbca -silent -createDatabase \
+                      -templateName General_Purpose.dbc \
+                      -gdbName FREE \
+                      -sid FREE \
+                      -responseFile NO_VALUE \
+                      -characterSet AL32UTF8 \
+                      -sysPassword "{{ oracle_admin_password }}" \
+                      -systemPassword "{{ oracle_admin_password }}" \
+                      -createAsContainerDatabase false \
+                      -databaseType MULTIPURPOSE \
+                      -automaticMemoryManagement false \
+                      -storageType FS \
+                      -ignorePreReqs
+                  become: true
+                  become_user: oracle
+                  register: oracle_init
+                  failed_when: oracle_init.rc != 0 and "ORA-01100" not in oracle_init.stderr
+
+                - name: Start Oracle Database listener
+                  ansible.builtin.shell: |
+                    source /home/oracle/.bash_profile
+                    lsnrctl start
+                  become: true
+                  become_user: oracle
+                  register: listener_start
+                  failed_when: false
+
+                - name: Display Oracle installation results
+                  ansible.builtin.debug:
+                    msg:
+                      - "🎉 Oracle Database Installation Complete!"
+                      - "Database SID: FREE"
+                      - "Oracle Home: /opt/oracle/product/23ai/dbhomeFree"
+                      - "Connection: {{ vm_ip }}:1521/FREE"
+                      - "SYS Password: {{ oracle_admin_password }}"
+
+          when: action == "install"
+
+        - name: Uninstall Oracle Database from target VM
+          block:
+            - name: Check if target VM exists
+              kubernetes.core.k8s_info:
+                api_version: kubevirt.io/v1
+                kind: VirtualMachineInstance
+                name: "{{ vm_name }}"
+                namespace: "{{ kubevirt_namespace }}"
+              register: target_vmi
+
+            - name: Remove Oracle Database (if VM exists)
+              delegate_to: "{{ vm_name }}"
+              block:
+                - name: Stop Oracle Database
+                  ansible.builtin.shell: |
+                    source /home/oracle/.bash_profile
+                    sqlplus / as sysdba <<EOF
+                    SHUTDOWN IMMEDIATE;
+                    EXIT;
+                    EOF
+                  become: true
+                  become_user: oracle
+                  failed_when: false
+
+                - name: Stop Oracle listener
+                  ansible.builtin.shell: |
+                    source /home/oracle/.bash_profile
+                    lsnrctl stop
+                  become: true
+                  become_user: oracle
+                  failed_when: false
+
+                - name: Remove Oracle Database RPMs
+                  ansible.builtin.dnf:
+                    name:
+                      - oracle-database-free-23ai
+                      - oracle-database-preinstall-23ai
+                    state: absent
+                  become: true
+                  failed_when: false
+
+                - name: Clean up Oracle directories
+                  ansible.builtin.file:
+                    path: "{{ item }}"
+                    state: absent
+                  loop:
+                    - /opt/oracle
+                    - /u01/app/oracle
+                    - /tmp/oracle-database-*.rpm
+                  become: true
+                  failed_when: false
+
+                - name: Display Oracle uninstall results
+                  ansible.builtin.debug:
+                    msg:
+                      - "🗑️ Oracle Database Uninstallation Complete!"
+                      - "All Oracle components removed from VM {{ vm_name }}"
+
+              when: target_vmi.resources | length > 0
+
+            - name: Display uninstall summary for non-existent VM
+              ansible.builtin.debug:
+                msg:
+                  - "VM {{ vm_name }} not found - Oracle uninstall completed"
+              when: target_vmi.resources | length == 0
+
+          when: action == "uninstall"

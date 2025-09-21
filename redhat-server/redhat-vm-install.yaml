@@ -1,11 +1,243 @@
----
-- name: Show instructions for Red Hat subscription credentials
+
+- name: Set qcow2 image path and filename
+  ansible.builtin.set_fact:
+    qcow2_image_path: "{{ qcow2_image_path | default('./rhel-9.6-x86_64-kvm.qcow2') }}"
+    qcow2_image_filename: "{{ qcow2_image_filename | default('rhel-9.6-x86_64-kvm.qcow2') }}"
+
+- name: Set auto-convert and EFI defaults
+  ansible.builtin.set_fact:
+    rhel_vm_auto_convert_qcow2_to_raw: "{{ rhel_vm_auto_convert_qcow2_to_raw | default(true) }}"
+    rhel_vm_enable_efi: "{{ rhel_vm_enable_efi | default(false) }}"
+
+- name: Check if qcow2 image is present
+  ansible.builtin.stat:
+    path: "{{ qcow2_image_path }}"
+  register: qcow2_image_stat
+
+- name: Display download instructions if qcow2 image is missing
   ansible.builtin.debug:
     msg:
-      - "To enable Red Hat subscription and yum package manager in the VM, set your credentials as environment variables before running this playbook:"
-      - "  export subscription_username='<your-rh-subscription-username>'"
-      - "  export subscription_password='<your-rh-subscription-password>'"
-      - "These will be passed to the VM for registration."
+      - "The required RHEL 9.6 qcow2 image is missing: {{ qcow2_image_path }}"
+      - "Please download it manually from: https://access.redhat.com/downloads/content/479/ver=/rhel---9/9.6/x86_64/product-software"
+      - "Filename: rhel-9.6-x86_64-kvm.qcow2 (or override in CR)"
+      - "Place the file at: {{ qcow2_image_path }} before running the installer."
+  when: not qcow2_image_stat.stat.exists
+
+- name: Optionally download qcow2 image if missing (set qcow2_auto_download=true to enable)
+  ansible.builtin.get_url:
+    url: "{{ qcow2_image_url | default('https://access.redhat.com/downloads/content/rhel-9/9.6/x86_64/guest-image-qcow2') }}"
+    dest: "{{ qcow2_image_path }}"
+    mode: '0644'
+    force: no
+  when: not qcow2_image_stat.stat.exists and (qcow2_auto_download | default(false))
+
+- name: Re-check if qcow2 image is present after download
+  ansible.builtin.stat:
+    path: "{{ qcow2_image_path }}"
+  register: qcow2_image_stat
+
+- name: Fail if qcow2 image is missing
+  ansible.builtin.fail:
+    msg: "RHEL 9.6 qcow2 image not found at {{ qcow2_image_path }}. Download it manually as instructed above, or set qcow2_auto_download=true to allow automatic download."
+  when: not qcow2_image_stat.stat.exists
+
+- name: Ensure storage base directory exists
+  ansible.builtin.set_fact:
+    storage_dir: "{{ storage_dir | default('/data/vms') }}"
+
+- name: Get node hostname for PV affinity
+  ansible.builtin.shell: kubectl get nodes -o jsonpath='{.items[0].metadata.name}'
+  register: node_hostname
+  changed_when: false
+
+- name: Set PV resources for RHEL (single system disk)
+  ansible.builtin.set_fact:
+    rhel_pv_resources:
+      - name: "{{ vm_name | default('rhel9-vm') }}-system-pv"
+        size: "{{ system_disk_size | default('20Gi') }}"
+        access_modes: ["ReadWriteOnce"]
+        path: "{{ vm_name | default('rhel9-vm') }}-system-disk"
+        claim_namespace: "{{ kubevirt_namespace | default('default') }}"
+
+- name: Compute absolute storage directory
+  ansible.builtin.set_fact:
+    storage_abs_dir: "{{ storage_dir }}"
+
+- name: Check for existing PVs for RHEL
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolume
+    name: "{{ item.name }}"
+  register: rhel_pv_check
+  failed_when: false
+  loop: "{{ rhel_pv_resources }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create PersistentVolume(s) for RHEL system disk
+  block:
+    - name: Create PersistentVolume for RHEL (if missing)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: "{{ item.name }}"
+            labels:
+              type: local
+              app: "{{ vm_name | default('rhel9-vm') }}"
+          spec:
+            capacity:
+              storage: "{{ item.size }}"
+            accessModes: "{{ item.access_modes }}"
+            persistentVolumeReclaimPolicy: Retain
+            storageClassName: local-storage
+            volumeMode: Filesystem
+            hostPath:
+              path: "{{ storage_abs_dir }}/{{ item.path }}"
+              type: Directory
+            nodeAffinity:
+              required:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: ["{{ node_hostname.stdout }}"]
+      when: rhel_pv_check.results[pv_idx].resources | length == 0
+      loop: "{{ rhel_pv_resources }}"
+      loop_control:
+        index_var: pv_idx
+
+- name: Ensure hostPath directory exists for RHEL PV (local control host; ensure same on node)
+  ansible.builtin.file:
+    path: "{{ storage_dir }}/{{ vm_name | default('rhel9-vm') }}-system-disk"
+    state: directory
+    mode: '0777'
+
+
+- name: Create PVC for VM root disk (qcow2)
+  block:
+    - name: Check for existing PVC for rhel9 system disk
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ vm_name | default('rhel9-vm') }}-system-disk"
+        namespace: "{{ kubevirt_namespace | default('default') }}"
+      register: existing_rhel_pvc
+      failed_when: false
+
+    - name: Delete existing PVC if storageClass mismatches desired (local-storage) or is not Bound
+      kubernetes.core.k8s:
+        state: absent
+        kind: PersistentVolumeClaim
+        api_version: v1
+        name: "{{ vm_name | default('rhel9-vm') }}-system-disk"
+        namespace: "{{ kubevirt_namespace | default('default') }}"
+      register: pvc_removed
+      failed_when: false
+      when: existing_rhel_pvc.resources | length > 0 and ((existing_rhel_pvc.resources[0].spec.storageClassName | default('')) != 'local-storage' or (existing_rhel_pvc.resources[0].status.phase | default('') ) != 'Bound')
+
+    - name: Create PersistentVolumeClaim for VM root disk (bind to specific PV)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: "{{ vm_name | default('rhel9-vm') }}-system-disk"
+            namespace: "{{ kubevirt_namespace | default('default') }}"
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: "{{ system_disk_size | default('20Gi') }}"
+            storageClassName: local-storage
+            volumeMode: Filesystem
+            volumeName: "{{ vm_name | default('rhel9-vm') }}-system-pv"
+      when: qcow2_image_stat.stat.exists and (existing_rhel_pvc.resources | length == 0 or (pvc_removed is defined and pvc_removed.changed))
+  when: qcow2_image_stat.stat.exists
+
+- name: Wait for PV to be bound and get host path for PVC
+  block:
+    - name: Wait for PV to be Bound
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ vm_name | default('rhel9-vm') }}-system-pv"
+      register: pv_info
+      until: pv_info.resources | length > 0 and pv_info.resources[0].status.phase == 'Bound'
+      retries: 20
+      delay: 3
+      failed_when: false
+
+    - name: Fail if PV did not bind in time
+      ansible.builtin.fail:
+        msg: "PersistentVolume {{ vm_name | default('rhel9-vm') }}-system-pv did not bind within timeout. Check PVC and nodeAffinity."
+      when: pv_info.resources | length == 0 or pv_info.resources[0].status.phase != 'Bound'
+
+    - name: Set PV hostPath variable
+      ansible.builtin.set_fact:
+        pv_hostpath: "{{ pv_info.resources[0].spec.hostPath.path }}"
+  when: qcow2_image_stat.stat.exists
+
+- name: Ensure PV directory exists (create if missing)
+  ansible.builtin.file:
+    path: "{{ pv_hostpath | default(storage_abs_dir + '/' + (vm_name | default('rhel9-vm')) + '-system-disk') }}"
+    state: directory
+    mode: '0777'
+  when: qcow2_image_stat.stat.exists
+  register: pv_dir_create_result
+
+- name: Fail if PV directory creation failed
+  ansible.builtin.fail:
+    msg: "Failed to create PV directory for PVC {{ vm_name | default('rhel9-vm') }}-system-disk. Check local-path provisioner and permissions."
+  when: pv_dir_create_result is defined and pv_dir_create_result.failed
+
+- name: Check current disk format with qemu-img (from source qcow2)
+  ansible.builtin.command:
+    cmd: "qemu-img info '{{ qcow2_image_path }}'"
+  register: qemu_img_info
+  failed_when: false
+  changed_when: false
+  when: qcow2_image_stat.stat.exists and (rhel_vm_auto_convert_qcow2_to_raw | bool)
+
+- name: Convert qcow2 image to RAW format in PV directory
+  ansible.builtin.command:
+    cmd: "qemu-img convert -p -f qcow2 -O raw '{{ qcow2_image_path }}' '{{ (pv_hostpath | default(storage_abs_dir + '/' + (vm_name | default('rhel9-vm')) + '-system-disk')) + '/disk.img' }}'"
+  register: qemu_convert
+  changed_when: "qemu_convert.rc == 0"
+  failed_when: qemu_convert.rc != 0
+  when: >-
+    qcow2_image_stat.stat.exists and (rhel_vm_auto_convert_qcow2_to_raw | bool) and
+    ('file format: qcow2' in (qemu_img_info.stdout | default('')))
+
+- name: Convert system_disk_size to qemu-img compatible format
+  ansible.builtin.set_fact:
+    qemu_disk_size: "{{ system_disk_size | default('20Gi') | regex_replace('Gi$', 'G') | regex_replace('Mi$', 'M') | regex_replace('Ki$', 'K') | regex_replace('Ti$', 'T') | regex_replace('Pi$', 'P') | regex_replace('Ei$', 'E') }}"
+  when: >-
+    qcow2_image_stat.stat.exists and (rhel_vm_auto_convert_qcow2_to_raw | bool) and
+    (qemu_convert is defined and qemu_convert.rc == 0)
+
+- name: Resize raw disk image to match system_disk_size
+  ansible.builtin.command:
+    cmd: "qemu-img resize '{{ (pv_hostpath | default(storage_abs_dir + '/' + (vm_name | default('rhel9-vm')) + '-system-disk')) + '/disk.img' }}' {{ qemu_disk_size }}"
+  register: qemu_resize
+  changed_when: "qemu_resize.rc == 0"
+  failed_when: qemu_resize.rc != 0
+  when: >-
+    qcow2_image_stat.stat.exists and (rhel_vm_auto_convert_qcow2_to_raw | bool) and
+    (qemu_convert is defined and qemu_convert.rc == 0)
+
+- name: Set ownership and permissions on disk.img after conversion
+  ansible.builtin.file:
+    path: "{{ (pv_hostpath | default(storage_abs_dir + '/' + (vm_name | default('rhel9-vm')) + '-system-disk')) + '/disk.img' }}"
+    owner: qemu
+    group: qemu
+    mode: '0644'
+  when: qcow2_image_stat.stat.exists and (rhel_vm_auto_convert_qcow2_to_raw | bool) and (qemu_convert is defined and qemu_convert.rc == 0)
+
 
 - name: Set subscription credentials from environment
   ansible.builtin.set_fact:
@@ -13,7 +245,7 @@
     subscription_password: "{{ lookup('env', 'subscription_password') | default(subscription_password | default('XXXX')) }}"
 - name: Set storage_dir default
   ansible.builtin.set_fact:
-    storage_dir: "{{ storage_dir | default('./storage') }}"
+    storage_dir: "{{ storage_dir | default('/data/vms') }}"
 - name: Debug input variables
   debug:
     msg:
@@ -192,8 +424,8 @@
                   memory: "{{ vm_memory | default('4Gi') }}"
             volumes:
               - name: rootdisk
-                containerDisk:
-                  image: "{{ vm_image | default('registry.redhat.io/rhel9/rhel-guest-image:9.6') }}"
+                persistentVolumeClaim:
+                  claimName: "{{ vm_name | default('rhel9-vm') }}-system-disk"
               - name: cloudinitdisk
                 cloudInitNoCloud:
                   userData: |
@@ -217,6 +449,8 @@
                           ChallengeResponseAuthentication no
                           UsePAM yes
                     runcmd:
+                      - growpart /dev/vda 1
+                      - resize2fs /dev/vda1
                       - systemctl reload sshd
                       - echo "==== cloud-init runcmd starting ====" | tee -a /var/log/cloudinit-debug.log
                       - subscription-manager register --username="{{ subscription_username | default('XXXX') }}" --password="{{ subscription_password | default('XXXX') }}" --auto-attach 2>&1 | tee -a /var/log/cloudinit-debug.log
@@ -227,6 +461,12 @@
 - name: Fix cores to be integer type (ensure proper type casting)
   ansible.builtin.set_fact:
     vm_definition: "{{ vm_definition | combine({'spec': {'template': {'spec': {'domain': {'cpu': {'cores': vm_cpu_cores | default(2) | int}}}}}}, recursive=True) }}"
+
+
+- name: Optionally enable EFI firmware in VM definition
+  ansible.builtin.set_fact:
+    vm_definition: >-
+      {{ vm_definition | combine({'spec': {'template': {'spec': {'domain': {'firmware': {'efi': {} }}}}}}, recursive=True) if (rhel_vm_enable_efi | bool) else vm_definition }}
 
 - name: Create RHEL9 VM
   kubernetes.core.k8s:

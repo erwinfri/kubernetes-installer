@@ -156,6 +156,8 @@ class KubernetesCRDTUI:
             result = subprocess.run(['kubectl', 'apply', '-f', file_path], capture_output=True, text=True)
             if result.returncode == 0:
                 self.add_log_line(f"✅ CRD applied: {file_name}")
+                # Refresh the status display after successful CRD application
+                self.update_status_display()
             else:
                 self.add_log_line(f"❌ Failed to apply CRD {file_name}: {result.stderr}")
                 if 'no objects passed to apply' in result.stderr:
@@ -323,89 +325,120 @@ class KubernetesCRDTUI:
             except Exception:
                 pass  # If kubectl fails, just show all as not deployed
             
-            # Build tree view
-            self.status_walker.append(urwid.Text(('header', '📁 CRD FILES:')))
-            
+            # Build grouped tree view: CRD as parent, CRs as children
+            self.status_walker.append(urwid.Text(('header', 'Deployment Status')))
             deployed_crd_count = 0
-            if crd_files:
-                for crd_file in sorted(crd_files):
-                    crd_path = os.path.join(folder, crd_file)
-                    
-                    # Get CRD name from file
-                    crd_name = 'unknown'
-                    try:
-                        with open(crd_path, 'r') as f:
-                            crd_content = yaml.safe_load(f)
-                        if crd_content and crd_content.get('kind') == 'CustomResourceDefinition':
-                            crd_name = crd_content.get('metadata', {}).get('name', 'unknown')
-                    except Exception:
-                        pass
-                    
-                    # Check deployment status
-                    if crd_name in deployed_crds:
-                        status_icon = '🟢'
-                        status_color = 'status_running'
-                        deployed_crd_count += 1
-                    else:
-                        status_icon = '🔴' 
-                        status_color = 'status_stopped'
-                    
-                    # Display CRD with status (just filename)
-                    line = f'  {status_icon} {crd_file}'
-                    self.status_walker.append(urwid.Text((status_color, line)))
-            else:
-                self.status_walker.append(urwid.Text(('log_warning', '  ⚠️ No CRD files found')))
-                deployed_crd_count = 0
-            
-            self.status_walker.append(urwid.Text(""))
-            self.status_walker.append(urwid.Text(('header', '📄 CR FILES:')))
-            
             deployed_cr_count = 0
-            if cr_files:
-                for cr_file in sorted(cr_files):
-                    cr_path = os.path.join(folder, cr_file)
-                    
-                    # Get CR info from file
-                    cr_kind = 'unknown'
-                    cr_name = 'unknown'
-                    try:
-                        with open(cr_path, 'r') as f:
-                            cr_content = yaml.safe_load(f)
-                        if cr_content:
-                            cr_kind = cr_content.get('kind', 'unknown')
-                            cr_name = cr_content.get('metadata', {}).get('name', 'unknown')
-                    except Exception:
-                        pass
-                    
-                    # Check if CR is deployed (simplified check)
+            total_crds = len(crd_files)
+            total_crs = len(cr_files)
+            # Parse CRD files for kind/plural mapping
+            crd_info = {}
+            for crd_file in crd_files:
+                crd_path = os.path.join(folder, crd_file)
+                crd_name = 'unknown'
+                crd_plural = None
+                try:
+                    with open(crd_path, 'r') as f:
+                        crd_content = yaml.safe_load(f)
+                    if crd_content and crd_content.get('kind') == 'CustomResourceDefinition':
+                        crd_name = crd_content.get('metadata', {}).get('name', 'unknown')
+                        crd_plural = crd_content.get('spec', {}).get('names', {}).get('plural', None)
+                except Exception:
+                    pass
+                crd_info[crd_file] = {'name': crd_name, 'plural': crd_plural}
+            # Parse CR files for kind mapping
+            cr_files_info = []
+            for cr_file in cr_files:
+                cr_path = os.path.join(folder, cr_file)
+                cr_kind = 'unknown'
+                cr_name = 'unknown'
+                try:
+                    with open(cr_path, 'r') as f:
+                        cr_content = yaml.safe_load(f)
+                    if cr_content:
+                        cr_kind = cr_content.get('kind', 'unknown')
+                        cr_name = cr_content.get('metadata', {}).get('name', 'unknown')
+                except Exception:
+                    pass
+                cr_files_info.append({'file': cr_file, 'kind': cr_kind, 'name': cr_name})
+            # Get deployed CRDs from cluster
+            deployed_crds = set()
+            try:
+                result = subprocess.run(['kubectl', 'get', 'crd', '-o', 'name'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if line.strip():
+                            parts = line.split('/')
+                            if len(parts) == 2:
+                                deployed_crds.add(parts[1])
+            except Exception:
+                pass
+            # Build parent-child tree
+            for crd_file in sorted(crd_files):
+                crd_name = crd_info[crd_file]['name']
+                crd_plural = crd_info[crd_file]['plural']
+                if crd_name in deployed_crds:
+                    status_icon = '🟢'
+                    status_color = 'status_running'
+                    deployed_crd_count += 1
+                else:
+                    status_icon = '🔴'
+                    status_color = 'status_stopped'
+                line = f'{status_icon} [CRD] {crd_file}'
+                self.status_walker.append(urwid.Text((status_color, line)))
+                # Find matching CRs by kind/plural
+                for cr_info in cr_files_info:
+                    # Match by plural (lowercase) or kind (case-insensitive)
+                    match = False
+                    if crd_plural and cr_info['kind'].lower() == crd_plural.lower():
+                        match = True
+                    elif crd_name != 'unknown' and cr_info['kind'].lower() in crd_name.lower():
+                        match = True
+                    if match:
+                        # Check if CR is deployed
+                        is_deployed = False
+                        try:
+                            result = subprocess.run(['kubectl', 'get', cr_info['kind'].lower(), cr_info['name']],
+                                                  capture_output=True, text=True, timeout=3)
+                            is_deployed = (result.returncode == 0)
+                        except Exception:
+                            pass
+                        if is_deployed:
+                            cr_status_icon = '🟢'
+                            cr_status_color = 'status_running'
+                            deployed_cr_count += 1
+                        else:
+                            cr_status_icon = '🔴'
+                            cr_status_color = 'status_stopped'
+                        cr_line = f'    {cr_status_icon} [CR] {cr_info["file"]}'
+                        self.status_walker.append(urwid.Text((cr_status_color, cr_line)))
+            # Show CRs that did not match any CRD
+            unmatched_crs = [cr for cr in cr_files_info if not any(
+                (crd_info[crd_file]['plural'] and cr['kind'].lower() == crd_info[crd_file]['plural'].lower()) or
+                (crd_info[crd_file]['name'] != 'unknown' and cr['kind'].lower() in crd_info[crd_file]['name'].lower())
+                for crd_file in crd_files)]
+            if unmatched_crs:
+                self.status_walker.append(urwid.Text(('log_warning', '  ⚠️ Unmatched CRs:')))
+                for cr_info in unmatched_crs:
+                    # Check if CR is deployed
                     is_deployed = False
                     try:
-                        # Try to get the specific CR from cluster
-                        result = subprocess.run(['kubectl', 'get', cr_kind.lower(), cr_name], 
+                        result = subprocess.run(['kubectl', 'get', cr_info['kind'].lower(), cr_info['name']],
                                               capture_output=True, text=True, timeout=3)
                         is_deployed = (result.returncode == 0)
                     except Exception:
                         pass
-                    
                     if is_deployed:
-                        status_icon = '🟢'
-                        status_color = 'status_running'
+                        cr_status_icon = '🟢'
+                        cr_status_color = 'status_running'
                         deployed_cr_count += 1
                     else:
-                        status_icon = '🔴'
-                        status_color = 'status_stopped'
-                    
-                    # Display CR with status (just filename)
-                    line = f'  {status_icon} {cr_file}'
-                    self.status_walker.append(urwid.Text((status_color, line)))
-            else:
-                self.status_walker.append(urwid.Text(('log_warning', '  ⚠️ No CR files found')))
-                deployed_cr_count = 0
-            
+                        cr_status_icon = '🔴'
+                        cr_status_color = 'status_stopped'
+                    cr_line = f'    {cr_status_icon} [CR] {cr_info["file"]}'
+                    self.status_walker.append(urwid.Text((cr_status_color, cr_line)))
             # Simple summary
-            total_crds = len(crd_files)
-            total_crs = len(cr_files)
-            
             self.status_walker.append(urwid.Text(""))
             self.status_walker.append(urwid.Text(('header', f'📊 SUMMARY: CRDs {deployed_crd_count}/{total_crds} | CRs {deployed_cr_count}/{total_crs}')))
             
@@ -671,6 +704,8 @@ class KubernetesCRDTUI:
                 self.add_log_line(f"✅ CR applied: {file_name}")
                 if result.stdout:
                     self.add_log_line(f"🔎 kubectl output: {result.stdout.strip()}")
+                # Refresh the status display after successful CR application
+                self.update_status_display()
             else:
                 self.add_log_line(f"❌ Failed to apply CR {file_name}!")
                 self.add_log_line(f"🔎 kubectl stderr: {result.stderr.strip()}")
@@ -2002,6 +2037,8 @@ class KubernetesCRDTUI:
                                         capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     self.add_log_line(f"✅ CRD deleted successfully: {file_name}")
+                    # Refresh the status display after successful CRD deletion
+                    self.update_status_display()
                 else:
                     err = result.stderr
                     if 'NotFound' in err and 'error when deleting' in err:

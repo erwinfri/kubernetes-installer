@@ -30,6 +30,15 @@ spec:
                   type: integer
                 vm_memory:
                   type: string
+                system_disk_size:
+                  type: string
+                  default: "20Gi"
+                storage_dir:
+                  type: string
+                  default: "/data/vms"
+                qcow2_image_path:
+                  type: string
+                  default: "./rhel-9.6-x86_64-kvm.qcow2"
                 root_password:
                   type: string
                 user_password:

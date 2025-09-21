@@ -1,17 +1,31 @@
 ---
-# Tasks for removing RHEL9 VM from KubeVirt
-- name: Set uninstall parameters
+# Tasks: Uninstall RHEL VM and optional storage cleanup
+# This file is a tasks list (no play header) so it can be included by the controller.
+
+- name: Ensure uninstall variables have sensible defaults
   ansible.builtin.set_fact:
     vm_name: "{{ vm_name | default('rhel9-vm') }}"
     vm_namespace: "{{ vm_namespace | default('default') }}"
+    storage_dir: "{{ storage_dir | default('/data/vms') }}"
+    rhel_remove_hostpath_dir: "{{ rhel_remove_hostpath_dir | default(true) }}"
 
-- name: Delete RHEL9 VM
+- name: Set derived resource names
+  ansible.builtin.set_fact:
+    pv_name: "{{ pv_name | default(vm_name ~ '-system-pv') }}"
+    pvc_name: "{{ pvc_name | default(vm_name ~ '-system-disk') }}"
+
+- name: Set expected hostPath based on storage directory structure
+  ansible.builtin.set_fact:
+    pv_hostpath_expected: "{{ storage_dir }}/{{ vm_name }}-system-disk"
+
+- name: Delete VirtualMachine resource (idempotent)
   kubernetes.core.k8s:
     state: absent
     api_version: kubevirt.io/v1
     kind: VirtualMachine
     name: "{{ vm_name }}"
     namespace: "{{ vm_namespace }}"
+  failed_when: false
 
 - name: Wait for VM to be deleted
   kubernetes.core.k8s_info:
@@ -20,12 +34,94 @@
     name: "{{ vm_name }}"
     namespace: "{{ vm_namespace }}"
   register: vm_status
-  failed_when: vm_status.resources | length > 0
   until: vm_status.resources | length == 0
   retries: 10
   delay: 3
+  failed_when: false
 
-- name: Reminder Remove unused Red Hat VM subscription
+- name: Delete PVC for VM root disk (idempotent)
+  kubernetes.core.k8s:
+    state: absent
+    kind: PersistentVolumeClaim
+    api_version: v1
+    name: "{{ pvc_name }}"
+    namespace: "{{ vm_namespace }}"
+  failed_when: false
+
+- name: Wait for PVC deletion
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolumeClaim
+    name: "{{ pvc_name }}"
+    namespace: "{{ vm_namespace }}"
+  register: pvc_status
+  until: pvc_status.resources | length == 0
+  retries: 10
+  delay: 2
+  failed_when: false
+
+- name: Delete PersistentVolume for VM system disk (idempotent)
+  kubernetes.core.k8s:
+    state: absent
+    kind: PersistentVolume
+    api_version: v1
+    name: "{{ pv_name }}"
+  failed_when: false
+
+- name: Wait for PV to be fully deleted
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolume
+    name: "{{ pv_name }}"
+  register: pv_delete_status
+  until: pv_delete_status.resources | length == 0
+  retries: 15
+  delay: 2
+  failed_when: false
+
+- name: Get PV info to determine hostPath (before deletion)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolume
+    name: "{{ pv_name }}"
+  register: pv_info
+  failed_when: false
+
+- name: Set PV hostPath fact (if PV existed)
+  ansible.builtin.set_fact:
+    pv_hostpath_from_pv: "{{ pv_info.resources[0].spec.hostPath.path | default('') }}"
+  when: pv_info.resources | length > 0
+
+- name: Check if disk image exists before cleanup
+  ansible.builtin.stat:
+    path: "{{ (pv_hostpath_from_pv | default(pv_hostpath_expected)) }}/disk.img"
+  register: disk_image_check
+  failed_when: false
+
+- name: Display disk cleanup information
+  ansible.builtin.debug:
+    msg:
+      - "VM Disk Cleanup Information:"
+      - "  VM Name: {{ vm_name }}"
+      - "  Expected Path: {{ pv_hostpath_from_pv | default(pv_hostpath_expected) }}/disk.img"
+      - "  Disk Image Exists: {{ disk_image_check.stat.exists | default(false) }}"
+      - "  Will Remove Directory: {{ rhel_remove_hostpath_dir | bool }}"
+
+- name: Remove disk image file specifically
+  ansible.builtin.file:
+    path: "{{ (pv_hostpath_from_pv | default(pv_hostpath_expected)) }}/disk.img"
+    state: absent
+  when: rhel_remove_hostpath_dir | bool and disk_image_check.stat.exists | default(false)
+  failed_when: false
+
+- name: Optionally remove entire hostPath directory (local file removal)
+  ansible.builtin.file:
+    path: "{{ pv_hostpath_from_pv | default(pv_hostpath_expected) }}"
+    state: absent
+  when: rhel_remove_hostpath_dir | bool
+  failed_when: false
+
+- name: Reminder about Red Hat VM subscription
   ansible.builtin.debug:
     msg: |
       ⚠️  Do not forget to remove your unused Red Hat VM subscription from Red Hat Inventory:

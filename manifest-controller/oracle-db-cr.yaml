@@ -1,0 +1,15 @@
+apiVersion: infra.example.com/v1
+kind: OracleDB
+metadata:
+  name: oracle-db-demo
+spec:
+  action: install
+  vm_name: my-rhel-vm
+  kubevirt_namespace: default
+  oracle_vault_secret: secret/data/oracle-vm/admin
+  oracle_user: oracle
+  oracle_password: "Oracle123"
+  oracle_admin_password: "Oracle123"
+  oracle_sid: FREE
+  oracle_home: /opt/oracle/product/23ai/dbhomeFree
+  oracle_port: 1521
