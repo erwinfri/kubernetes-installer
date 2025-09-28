@@ -1,0 +1,207 @@
+# Tasks to deploy the base OTel Collector and orchestrate telemetry sources
+
+- name: Ensure OTel namespace is set
+  ansible.builtin.set_fact:
+    otel_namespace: "{{ otel_namespace | default('default') }}"
+
+- name: Initialize base OTel Collector configuration
+  ansible.builtin.set_fact:
+    otel_config:
+      receivers: {}
+      processors:
+        batch: {}
+      exporters: {}
+      service:
+        pipelines: {}
+    otel_env_vars: []
+    configured_redhat_collectors: []
+    configured_oracle_collectors: []
+    configured_windows_collectors: []
+    configured_mssql_collectors: []
+
+- name: Normalize optional component flags
+  ansible.builtin.set_fact:
+    include_vault: "{{ include_vault | default(false) }}"
+    include_redhat: "{{ include_redhat | default(false) }}"
+    include_oracle: "{{ include_oracle | default(false) }}"
+    include_windows: "{{ include_windows | default(false) }}"
+    include_mssql: "{{ include_mssql | default(false) }}"
+
+- name: Validate Vault inputs when component enabled
+  ansible.builtin.assert:
+    that:
+      - vault_otel_endpoint | default('') | length > 0
+      - vault_otel_token | default('') | length > 0
+    fail_msg: "vault_otel_endpoint and vault_otel_token must be provided when enabling the Vault telemetry component."
+  when: include_vault | bool
+
+- name: Include Vault metrics configuration
+  ansible.builtin.include_tasks: otel-vault-install.yaml
+  when: include_vault | bool
+
+- name: Include Red Hat metrics configuration
+  ansible.builtin.include_tasks: otel-redhat-install.yaml
+  when: include_redhat | bool
+
+- name: Include Oracle metrics configuration
+  ansible.builtin.include_tasks: otel-oracle-install.yaml
+  when: include_oracle | bool
+
+- name: Include Windows telemetry configuration
+  ansible.builtin.include_tasks: otel-windows-install.yaml
+  when: include_windows | bool
+  vars:
+    enable_sql_collector: "{{ include_mssql | default(false) }}"
+
+- name: Include MSSQL telemetry configuration
+  ansible.builtin.include_tasks: otel-mssql-install.yaml
+  when: include_mssql | bool
+
+- name: Show configured Red Hat telemetry targets
+  ansible.builtin.debug:
+    msg: "Configured Red Hat collectors: {{ configured_redhat_collectors }}"
+  when: configured_redhat_collectors | length > 0
+
+- name: Show configured Oracle telemetry targets
+  ansible.builtin.debug:
+    msg: "Configured Oracle collectors: {{ configured_oracle_collectors }}"
+  when: configured_oracle_collectors | length > 0
+
+- name: Show configured Windows telemetry targets
+  ansible.builtin.debug:
+    msg: "Configured Windows collectors: {{ configured_windows_collectors }}"
+  when: configured_windows_collectors | length > 0
+
+- name: Show configured MSSQL telemetry targets
+  ansible.builtin.debug:
+    msg: "Configured MSSQL collectors: {{ configured_mssql_collectors }}"
+  when: configured_mssql_collectors | length > 0
+
+- name: Ensure default collector pipeline when none configured
+  ansible.builtin.set_fact:
+    otel_config: "{{ otel_config | combine(default_pipeline_fragment, recursive=True) }}"
+  vars:
+    default_pipeline_fragment:
+      receivers:
+        otlp:
+          protocols:
+            grpc: {}
+            http: {}
+      exporters:
+        debug/default:
+          verbosity: detailed
+      service:
+        pipelines:
+          metrics/default:
+            receivers:
+              - otlp
+            processors:
+              - batch
+            exporters:
+              - debug/default
+  when: (otel_config.service.pipelines | default({})) | length == 0
+
+- name: Note default collector pipeline activation
+  ansible.builtin.debug:
+    msg: "No component-specific pipelines detected; enabled default OTLP -> debug pipeline."
+  when: (otel_config.service.pipelines | default({})) | length == 1 and 'metrics/default' in otel_config.service.pipelines
+
+- name: Create or update OTel Collector ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: otel-collector-config
+        namespace: "{{ otel_namespace }}"
+      data:
+        otel-collector-config.yaml: |
+          {{ otel_config | to_nice_yaml | indent(10, true) }}
+
+- name: Deploy OTel Collector Service
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: otel-collector-service
+        namespace: "{{ otel_namespace }}"
+      spec:
+        selector:
+          app: otel-collector
+        ports:
+          - name: otlp-grpc
+            port: 4317
+            targetPort: 4317
+          - name: otlp-http
+            port: 4318
+            targetPort: 4318
+
+- name: Build OTel Collector deployment definition
+  ansible.builtin.set_fact:
+    otel_deployment_definition: >-
+      {{
+        {
+          'apiVersion': 'apps/v1',
+          'kind': 'Deployment',
+          'metadata': {
+            'name': 'otel-collector',
+            'namespace': otel_namespace
+          },
+          'spec': {
+            'replicas': 1,
+            'selector': {
+              'matchLabels': {
+                'app': 'otel-collector'
+              }
+            },
+            'template': {
+              'metadata': {
+                'labels': {
+                  'app': 'otel-collector'
+                }
+              },
+              'spec': {
+                'dnsConfig': {
+                  'options': [
+                    {
+                      'name': 'ndots',
+                      'value': '1'
+                    }
+                  ]
+                },
+                'containers': [
+                  {
+                    'name': 'otel-collector',
+                    'image': otel_collector_image | default('otel/opentelemetry-collector-contrib:0.133.0'),
+                    'args': ['--config=/etc/otel-collector-config.yaml'],
+                    'env': otel_env_vars | default([]),
+                    'volumeMounts': [
+                      {
+                        'name': 'otel-config',
+                        'mountPath': '/etc/otel-collector-config.yaml',
+                        'subPath': 'otel-collector-config.yaml'
+                      }
+                    ]
+                  }
+                ],
+                'volumes': [
+                  {
+                    'name': 'otel-config',
+                    'configMap': {
+                      'name': 'otel-collector-config'
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }}
+
+- name: Deploy OTel Collector Deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ otel_deployment_definition }}"

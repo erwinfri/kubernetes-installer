@@ -23,6 +23,13 @@
   set_fact:
     otel_collector_present: "{{ otel_pods.resources | length > 0 }}"
 
+- name: Ensure telemetry collector metadata defaults
+  set_fact:
+    configured_redhat_collectors: "{{ configured_redhat_collectors | default([], true) }}"
+    configured_oracle_collectors: "{{ configured_oracle_collectors | default([], true) }}"
+    configured_windows_collectors: "{{ configured_windows_collectors | default([], true) }}"
+    configured_mssql_collectors: "{{ configured_mssql_collectors | default([], true) }}"
+
 - name: Get recent OTel Collector logs
   ansible.builtin.shell: |
     kubectl logs -n {{ otel_namespace }} -l app=otel-collector --tail=20
@@ -44,8 +51,11 @@
       - "OTel Collector is deployed in namespace '{{ otel_namespace }}'."
       - "To check pod status: kubectl get pods -n {{ otel_namespace }} -l app=otel-collector"
       - "To see logs: kubectl logs -n {{ otel_namespace }} -l app=otel-collector --tail=60"
-      - "Metrics are scraped from Vault at http://vault.default.svc.cluster.local:8200/v1/sys/metrics"
-      - "Metrics are exported to: {{ otel_endpoint }}"
+      - "Vault metrics endpoint: {{ vault_otel_endpoint | default('not configured') }}"
+      - "Configured Red Hat collectors: {{ configured_redhat_collectors }}"
+      - "Configured Oracle collectors: {{ configured_oracle_collectors }}"
+      - "Configured Windows collectors: {{ configured_windows_collectors }}"
+      - "Configured MSSQL collectors: {{ configured_mssql_collectors }}"
   when: otel_collector_present | bool
 
 - name: Show OTel Collector not present message

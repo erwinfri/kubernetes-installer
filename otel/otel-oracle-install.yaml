@@ -1,0 +1,131 @@
+---
+# Tasks to enable Oracle database telemetry and wire pipelines into the OTel Collector
+
+- name: Assert Oracle VM name provided
+  ansible.builtin.assert:
+    that:
+      - oracle_vm_name | default('') | length > 0
+    fail_msg: "oracle_vm_name must be provided when enabling the Oracle telemetry component."
+
+- name: Assert Oracle OTLP destination provided
+  ansible.builtin.assert:
+    that:
+      - oracle_otel_endpoint | default('') | length > 0
+      - oracle_otel_token | default('') | length > 0
+    fail_msg: "Provide oracle_otel_endpoint and oracle_otel_token values for the Oracle telemetry component."
+
+- name: Determine Oracle metrics credentials
+  ansible.builtin.set_fact:
+    oracle_metrics_username: "{{ oracle_metrics_username | default(oracle_app_username | default('appuser')) }}"
+    oracle_metrics_password: "{{ oracle_metrics_password | default(oracle_admin_password | default('')) }}"
+
+- name: Validate Oracle metrics credentials
+  ansible.builtin.assert:
+    that:
+      - oracle_metrics_username | default('') | length > 0
+      - oracle_metrics_password | default('') | length > 0
+    fail_msg: "Unable to determine Oracle metrics username/password; ensure oracle_metrics_username and oracle_metrics_password are set."
+
+- name: Determine Oracle service name
+  ansible.builtin.set_fact:
+    oracle_service_name_effective: "{{ oracle_service_name | default(oracle_pdb_name | default(oracle_sid | default('FREE'))) }}"
+
+- name: Prepare Oracle collector identifiers
+  ansible.builtin.set_fact:
+    oracle_collector_name: "{{ oracle_vm_name }}"
+    oracle_collector_slug: "{{ (oracle_vm_name | default('oracle') | lower | regex_replace('[^a-z0-9]+', '-')) | regex_replace('^-+|-+$', '') }}"
+    oracle_env_prefix: "ORACLE_{{ (oracle_vm_name | default('oracle')) | upper | regex_replace('[^A-Z0-9]+', '_') }}"
+
+- name: Derive Oracle collector environment variable names
+  ansible.builtin.set_fact:
+    oracle_env_endpoint_var: "{{ oracle_env_prefix }}_OTEL_ENDPOINT"
+    oracle_env_token_var: "{{ oracle_env_prefix }}_OTEL_TOKEN"
+    oracle_env_user_var: "{{ oracle_env_prefix }}_DB_USERNAME"
+    oracle_env_password_var: "{{ oracle_env_prefix }}_DB_PASSWORD"
+
+- name: Set Oracle collector address when provided
+  ansible.builtin.set_fact:
+    oracle_collector_address: "{{ oracle_vm_address | trim }}"
+  when: oracle_vm_address | default('') | length > 0
+
+- name: Discover Oracle VM address from KubeVirt
+  ansible.builtin.command: >
+    kubectl get vmi {{ oracle_vm_name }} -n {{ oracle_vm_namespace }} -o jsonpath='{.status.interfaces[0].ipAddress}'
+  register: oracle_vm_ip_discovery
+  changed_when: false
+  when: oracle_vm_address | default('') | length == 0
+
+- name: Register discovered Oracle address
+  ansible.builtin.set_fact:
+    oracle_collector_address: "{{ oracle_vm_ip_discovery.stdout | default('') | trim }}"
+  when: oracle_vm_address | default('') | length == 0
+
+- name: Validate Oracle collector address
+  ansible.builtin.assert:
+    that:
+      - oracle_collector_address is defined
+      - oracle_collector_address | length > 0
+    fail_msg: "Unable to determine address for Oracle collector {{ oracle_collector_name }}"
+
+- name: Register Oracle collector metadata
+  ansible.builtin.set_fact:
+    configured_oracle_collectors: "{{ configured_oracle_collectors + [ {
+      'name': oracle_collector_name,
+      'address': oracle_collector_address,
+      'listener_port': oracle_listener_port,
+      'service': oracle_service_name_effective,
+      'otel_endpoint': oracle_otel_endpoint
+    } ] }}"
+
+- name: Prepare Oracle component identifiers
+  ansible.builtin.set_fact:
+    oracle_receiver_name: "oracledb/oracle-{{ oracle_collector_slug }}"
+    oracle_exporter_name: "otlphttp/oracle-{{ oracle_collector_slug }}"
+    oracle_pipeline_name: "metrics/oracle-{{ oracle_collector_slug }}"
+
+- name: Merge Oracle pipeline into collector configuration
+  ansible.builtin.set_fact:
+    otel_config: "{{ otel_config | combine(oracle_config_fragment, recursive=True) }}"
+  vars:
+    oracle_config_fragment: >-
+      {{ {
+          'receivers': {
+            oracle_receiver_name: {
+              'endpoint': oracle_collector_address ~ ':' ~ (oracle_listener_port | string),
+              'service': oracle_service_name_effective,
+              'username': '${' ~ oracle_env_user_var ~ '}',
+              'password': '${' ~ oracle_env_password_var ~ '}',
+              'collection_interval': '60s'
+            }
+          },
+          'exporters': {
+            oracle_exporter_name: {
+              'endpoint': '${' ~ oracle_env_endpoint_var ~ '}',
+              'headers': {
+                'Authorization': 'Bearer ${' ~ oracle_env_token_var ~ '}'
+              },
+              'tls': {
+                'insecure': True
+              }
+            }
+          },
+          'service': {
+            'pipelines': {
+              oracle_pipeline_name: {
+                'receivers': [oracle_receiver_name],
+                'processors': ['batch'],
+                'exporters': [oracle_exporter_name]
+              }
+            }
+          }
+        } }}
+
+- name: Append Oracle exporter credentials and DB auth for deployment env vars
+  ansible.builtin.set_fact:
+    otel_env_vars: "{{ otel_env_vars + [
+      { 'name': oracle_env_endpoint_var, 'value': oracle_otel_endpoint },
+      { 'name': oracle_env_token_var, 'value': oracle_otel_token },
+      { 'name': oracle_env_user_var, 'value': oracle_metrics_username },
+      { 'name': oracle_env_password_var, 'value': oracle_metrics_password }
+    ] }}"
+  no_log: true

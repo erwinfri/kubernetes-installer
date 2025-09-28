@@ -1,0 +1,67 @@
+---
+# Tasks to enable Red Hat VM telemetry and wire pipelines into the OTel Collector
+
+- name: Ensure sshpass is installed for Red Hat telemetry bootstrap
+  become: true
+  ansible.builtin.package:
+    name: sshpass
+    state: present
+
+
+- name: Assert Red Hat VM name provided
+  ansible.builtin.assert:
+    that:
+      - redhat_vm_name | default('') | length > 0
+    fail_msg: "redhat_vm_name must be provided when enabling the Red Hat telemetry component."
+
+  
+- name: Assert Red Hat OTLP destination provided
+  ansible.builtin.assert:
+    that:
+      - redhat_otel_endpoint | default('') | length > 0
+      - redhat_otel_token | default('') | length > 0
+    fail_msg: "Provide redhat_otel_endpoint and redhat_otel_token values for the Red Hat telemetry component."
+
+- name: Determine Red Hat SSH username
+  ansible.builtin.set_fact:
+    redhat_vm_username: "{{ redhat_vm_username | default(redhat_user | default('')) }}"
+
+- name: Determine Red Hat SSH password
+  ansible.builtin.set_fact:
+    redhat_vm_password: "{{ redhat_vm_password | default(user_password | default('')) }}"
+
+- name: Validate Red Hat credentials
+  ansible.builtin.assert:
+    that:
+      - redhat_vm_username | default('') | length > 0
+      - redhat_vm_password | default('') | length > 0
+    fail_msg: "Unable to determine Red Hat VM SSH username/password; ensure redhat_user and user_password are set."
+
+- name: Build Red Hat collector definition
+  ansible.builtin.set_fact:
+    redhat_collector_definition:
+      name: "{{ redhat_vm_name }}"
+      vm_name: "{{ redhat_vm_name }}"
+      username: "{{ redhat_vm_username }}"
+      password: "{{ redhat_vm_password }}"
+      kubevirt_namespace: "{{ redhat_vm_namespace }}"
+      metrics_port: "{{ redhat_vm_metrics_port }}"
+      otel_endpoint: "{{ redhat_otel_endpoint }}"
+      otel_token: "{{ redhat_otel_token }}"
+
+- name: Include static address when provided
+  ansible.builtin.set_fact:
+    redhat_collector_definition: "{{ redhat_collector_definition | combine({'address': redhat_vm_address}) }}"
+  when: redhat_vm_address | default('') | length > 0
+
+- name: Configure Red Hat collector
+  ansible.builtin.include_tasks: otel-redhat-install-loop.yaml
+  loop: "{{ [redhat_collector_definition] }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    collector_name: "{{ item.name }}"
+    collector_namespace: "{{ item.kubevirt_namespace }}"
+    collector_slug: "{{ item.name | lower | regex_replace('[^a-z0-9]+', '-') }}"
+    collector_metrics_port: "{{ item.metrics_port | default(9100) }}"
+    env_var_prefix: "REDHAT_{{ item.name | upper | regex_replace('[^A-Z0-9]+', '_') }}"

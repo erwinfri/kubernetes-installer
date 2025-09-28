@@ -1,0 +1,130 @@
+---
+# Tasks to configure MSSQL telemetry using the Prometheus scrape model on the Windows exporter
+
+- name: Assert MSSQL telemetry inputs
+  ansible.builtin.assert:
+    that:
+      - windows_vm_name | default('') | length > 0
+      - windows_vm_namespace | default('') | length > 0
+    fail_msg: "windows_vm_name and windows_vm_namespace must be provided when enabling the MSSQL telemetry component."
+
+- name: Assert MSSQL OTLP destination provided
+  ansible.builtin.assert:
+    that:
+      - mssql_otel_endpoint | default('') | length > 0
+      - mssql_otel_token | default('') | length > 0
+    fail_msg: "mssql_otel_endpoint and mssql_otel_token are required for the MSSQL telemetry component."
+  no_log: true
+
+- name: Gather Windows collector metadata for MSSQL pipeline
+  ansible.builtin.set_fact:
+    mssql_windows_metadata_list: "{{ configured_windows_collectors | default([], true) | selectattr('vm_name', 'equalto', windows_vm_name) | list }}"
+
+- name: Ensure Windows telemetry component ran before MSSQL
+  ansible.builtin.assert:
+    that:
+      - mssql_windows_metadata_list | length > 0
+    fail_msg: "Windows telemetry must be configured before enabling MSSQL telemetry."
+
+- name: Select Windows collector metadata for MSSQL
+  ansible.builtin.set_fact:
+    mssql_windows_metadata: "{{ mssql_windows_metadata_list[0] }}"
+
+- name: Prepare MSSQL telemetry identifiers
+  ansible.builtin.set_fact:
+    mssql_collector_slug: "{{ mssql_windows_metadata.slug | default((windows_vm_name | lower | regex_replace('[^a-z0-9]+', '-')) | regex_replace('^-+|-+$', '')) }}"
+    mssql_env_prefix: "MSSQL_{{ (windows_vm_name | upper | regex_replace('[^A-Z0-9]+', '_')) }}"
+    mssql_env_endpoint_var: "{{ mssql_env_prefix }}_OTEL_ENDPOINT"
+    mssql_env_token_var: "{{ mssql_env_prefix }}_OTEL_TOKEN"
+    mssql_receiver_name: "prometheus/mssql-{{ mssql_collector_slug }}"
+    mssql_exporter_name: "otlphttp/mssql-{{ mssql_collector_slug }}"
+    mssql_pipeline_name: "metrics/mssql-{{ mssql_collector_slug }}"
+    mssql_collect_params: ['sql']
+
+- name: Determine MSSQL scrape target
+  ansible.builtin.set_fact:
+    mssql_collector_address: "{{ mssql_windows_metadata.address | default(windows_collector_address | default('')) }}"
+    mssql_metrics_port: "{{ (mssql_windows_metadata.metrics_port | default((windows_exporter_port | default(9182)) | int)) | int }}"
+
+- name: Validate MSSQL scrape target information
+  ansible.builtin.assert:
+    that:
+      - mssql_collector_address | default('') | length > 0
+    fail_msg: "Unable to determine scrape target for MSSQL telemetry on VM {{ windows_vm_name }}."
+
+- name: Merge MSSQL scrape pipeline into collector configuration
+  ansible.builtin.set_fact:
+    otel_config: "{{ otel_config | combine(mssql_config_fragment, recursive=True) }}"
+  vars:
+    mssql_config_fragment: >-
+      {{ {
+          'receivers': {
+            mssql_receiver_name: {
+              'config': {
+                'scrape_configs': [
+                  {
+                    'job_name': 'mssql-' ~ mssql_collector_slug,
+                    'scrape_interval': '30s',
+                    'metrics_path': '/metrics',
+                    'params': {
+                      'collect[]': mssql_collect_params
+                    },
+                    'static_configs': [
+                      {
+                        'targets': [ mssql_collector_address ~ ':' ~ (mssql_metrics_port | string) ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          'exporters': {
+            mssql_exporter_name: {
+              'endpoint': '${' ~ mssql_env_endpoint_var ~ '}',
+              'headers': {
+                'Authorization': 'Bearer ${' ~ mssql_env_token_var ~ '}'
+              },
+              'tls': {
+                'insecure': True
+              }
+            }
+          },
+          'service': {
+            'pipelines': {
+              mssql_pipeline_name: {
+                'receivers': [ mssql_receiver_name ],
+                'processors': [ 'batch' ],
+                'exporters': [ mssql_exporter_name ]
+              }
+            }
+          }
+        } }}
+
+- name: Append MSSQL exporter credentials for deployment env vars
+  ansible.builtin.set_fact:
+    otel_env_vars: "{{ (otel_env_vars | rejectattr('name', 'equalto', mssql_env_endpoint_var) | rejectattr('name', 'equalto', mssql_env_token_var) | list) + [
+      { 'name': mssql_env_endpoint_var, 'value': mssql_otel_endpoint },
+      { 'name': mssql_env_token_var, 'value': mssql_otel_token }
+    ] }}"
+  no_log: true
+
+- name: Track configured MSSQL collector details
+  ansible.builtin.set_fact:
+    configured_mssql_collectors: "{{ (configured_mssql_collectors | default([], true) | rejectattr('vm_name', 'equalto', windows_vm_name) | list) + [ {
+      'vm_name': windows_vm_name,
+      'namespace': windows_vm_namespace,
+      'address': mssql_collector_address,
+      'metrics_port': mssql_metrics_port,
+      'instance': mssql_instance_name,
+      'otel_endpoint': mssql_otel_endpoint
+    } ] }}"
+
+- name: Show MSSQL telemetry configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "MSSQL telemetry configured for VM '{{ windows_vm_name }}' using Prometheus scrape model"
+      - "SQL instance: {{ mssql_instance_name }}"
+      - "Exporter target: http://{{ mssql_collector_address }}:{{ mssql_metrics_port }}/metrics?collect[]=sql"
+      - "Metrics forwarded to: {{ mssql_otel_endpoint }}"
+

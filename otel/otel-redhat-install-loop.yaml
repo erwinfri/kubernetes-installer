@@ -1,0 +1,148 @@
+---
+# Subtasks applied for each Red Hat VM collector entry
+
+- name: Prepare environment variable names for {{ collector_name }}
+  ansible.builtin.set_fact:
+    env_endpoint_var: "{{ env_var_prefix }}_OTEL_ENDPOINT"
+    env_token_var: "{{ env_var_prefix }}_OTEL_TOKEN"
+
+- name: Determine target address for {{ collector_name }}
+  ansible.builtin.set_fact:
+    redhat_collector_address: "{{ item.address | default(redhat_vm_ip_command.stdout | default('')) | trim }}"
+  vars:
+    redhat_vm_ip_command: ""
+  when: item.address is defined
+
+- name: Discover network address from KubeVirt for {{ collector_name }}
+  ansible.builtin.command: >
+    kubectl get vmi {{ item.vm_name }} -n {{ collector_namespace }} -o jsonpath='{.status.interfaces[0].ipAddress}'
+  register: redhat_vm_ip_discovery
+  changed_when: false
+  when: item.address is not defined
+
+- name: Register discovered address for {{ collector_name }}
+  ansible.builtin.set_fact:
+    redhat_collector_address: "{{ redhat_vm_ip_discovery.stdout | trim }}"
+  when: item.address is not defined
+
+- name: Validate resolved address for {{ collector_name }}
+  ansible.builtin.assert:
+    that:
+      - redhat_collector_address is defined
+      - redhat_collector_address | length > 0
+    fail_msg: "Unable to determine address for {{ collector_name }}"
+
+- name: Ensure node exporter is installed on {{ collector_name }}
+  ansible.builtin.shell: |
+    sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ item.username }}@{{ redhat_collector_address }} "sudo bash -s" <<'EOS'
+    set -euo pipefail
+    NODE_EXPORTER_VERSION="${NODE_EXPORTER_VERSION:-1.7.0}"
+    TMP_DIR=$(mktemp -d)
+    cleanup() { rm -rf "$TMP_DIR"; }
+    trap cleanup EXIT
+    if ! id -u node_exporter >/dev/null 2>&1; then
+      useradd --system --no-create-home --shell /sbin/nologin node_exporter || true
+    fi
+    if [ ! -f /usr/local/bin/node_exporter ]; then
+      curl -fsSL -o "$TMP_DIR/node_exporter.tar.gz" "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
+      tar -xzf "$TMP_DIR/node_exporter.tar.gz" -C "$TMP_DIR"
+      install -m 0755 "$TMP_DIR/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" /usr/local/bin/node_exporter
+    fi
+    cat <<'SERVICE' > /etc/systemd/system/node_exporter.service
+    [Unit]
+    Description=Prometheus Node Exporter
+    Wants=network-online.target
+    After=network-online.target
+    [Service]
+    Type=simple
+    User=node_exporter
+    Group=node_exporter
+    ExecStart=/usr/local/bin/node_exporter --web.listen-address=:{{ collector_metrics_port }}
+    Restart=on-failure
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+    systemctl daemon-reload
+    systemctl enable --now node_exporter
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port={{ collector_metrics_port }}/tcp || true
+      firewall-cmd --reload || true
+    fi
+    EOS
+  environment:
+    NODE_EXPORTER_VERSION: "{{ node_exporter_version | default('1.7.0') }}"
+    SSH_PASSWORD: "{{ item.password }}"
+
+- name: Register Red Hat collector metadata
+  ansible.builtin.set_fact:
+    configured_redhat_collectors: "{{ configured_redhat_collectors + [ {
+      'name': collector_name,
+      'address': redhat_collector_address,
+      'metrics_port': collector_metrics_port,
+      'otel_endpoint': item.otel_endpoint
+    } ] }}"
+
+- name: Prepare Red Hat component identifiers
+  ansible.builtin.set_fact:
+    redhat_receiver_name: "prometheus/redhat-{{ collector_slug }}"
+    redhat_exporter_name: "otlphttp/redhat-{{ collector_slug }}"
+    redhat_pipeline_name: "metrics/redhat-{{ collector_slug }}"
+
+- name: Merge Red Hat pipeline into collector configuration
+  ansible.builtin.set_fact:
+    otel_config: "{{ otel_config | combine(redhat_config_fragment, recursive=True) }}"
+  vars:
+    redhat_config_fragment: >-
+      {{ {
+          'receivers': {
+            redhat_receiver_name: {
+              'config': {
+                'scrape_configs': [
+                  {
+                    'job_name': 'redhat-' ~ collector_slug,
+                    'scrape_interval': '30s',
+                    'static_configs': [
+                      {
+                        'targets': [ redhat_collector_address ~ ':' ~ collector_metrics_port|string ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          'exporters': {
+            redhat_exporter_name: {
+              'endpoint': '${' ~ env_endpoint_var ~ '}',
+              'headers': {
+                'Authorization': 'Bearer ${' ~ env_token_var ~ '}'
+              },
+              'tls': {
+                'insecure': True
+              }
+            }
+          },
+          'service': {
+            'pipelines': {
+              redhat_pipeline_name: {
+                'receivers': [ redhat_receiver_name ],
+                'processors': [ 'batch' ],
+                'exporters': [ redhat_exporter_name ]
+              }
+            }
+          }
+        } }}
+
+- name: Append Red Hat exporter credentials for deployment env vars
+  ansible.builtin.set_fact:
+    otel_env_vars: "{{ otel_env_vars + [
+      {
+        'name': env_endpoint_var,
+        'value': item.otel_endpoint
+      },
+      {
+        'name': env_token_var,
+        'value': item.otel_token
+      }
+    ] }}"
+  no_log: true

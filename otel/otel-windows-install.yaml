@@ -1,0 +1,386 @@
+---
+# Tasks to configure Windows Server telemetry using the Prometheus scrape model
+
+- name: Assert Windows telemetry inputs
+  ansible.builtin.assert:
+    that:
+      - windows_vm_name | default('') | length > 0
+      - windows_vm_namespace | default('') | length > 0
+    fail_msg: "windows_vm_name and windows_vm_namespace must be provided when enabling the Windows telemetry component."
+
+- name: Assert Windows credentials and OTLP destination provided
+  ansible.builtin.assert:
+    that:
+      - windows_admin_username | default('') | length > 0
+      - windows_otel_endpoint | default('') | length > 0
+      - windows_otel_token | default('') | length > 0
+    fail_msg: "windows_admin_username, windows_otel_endpoint, and windows_otel_token are required for the Windows telemetry component."
+  no_log: true
+
+- name: Set Windows exporter defaults
+  ansible.builtin.set_fact:
+    windows_exporter_version: "{{ windows_exporter_version | default('0.24.0') }}"
+    windows_exporter_port: "{{ (windows_exporter_port | default(9182)) | int }}"
+    enable_sql_collector: "{{ enable_sql_collector | default(false) | bool }}"
+
+- name: Resolve Windows admin password from Vault when needed
+  ansible.builtin.set_fact:
+    windows_vault_token_effective: "{{ vault_token if vault_token | default('') | length > 0 else lookup('env', 'VAULT_TOKEN') }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: true
+
+- name: Validate Vault parameters for Windows credential lookup
+  ansible.builtin.assert:
+    that:
+      - windows_vault_token_effective | default('') | length > 0
+      - vault_addr | default('') | length > 0
+    fail_msg: "Provide vault_addr and vault_token (or set VAULT_TOKEN) when windows_admin_password_vault_path is specified."
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: true
+
+- name: Retrieve Windows admin password from Vault
+  ansible.builtin.shell: |
+    vault kv get -field=password {{ windows_admin_password_vault_path }}
+  register: windows_admin_password_lookup
+  changed_when: false
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+    VAULT_TOKEN: "{{ windows_vault_token_effective }}"
+    VAULT_NAMESPACE: "{{ vault_namespace | default('', true) }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: true
+  failed_when: windows_admin_password_lookup.rc != 0
+
+- name: Set Windows admin password from Vault
+  ansible.builtin.set_fact:
+    windows_admin_password: "{{ windows_admin_password_lookup.stdout | trim }}"
+    windows_admin_password_source: "vault:{{ windows_admin_password_vault_path }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: true
+
+- name: Record Windows admin credential source
+  ansible.builtin.set_fact:
+    windows_admin_password_source: "provided"
+  when:
+    - windows_admin_password | default('') | length > 0
+    - windows_admin_password_source is not defined
+  no_log: true
+
+- name: Ensure Windows admin password is available
+  ansible.builtin.assert:
+    that:
+      - windows_admin_password | default('') | length > 0
+    fail_msg: "windows_admin_password must be provided directly or via windows_admin_password_vault_path."
+  no_log: true
+
+- name: Prepare Windows telemetry identifiers
+  ansible.builtin.set_fact:
+    windows_collector_name: "{{ windows_vm_name }}"
+    windows_collector_slug: "{{ (windows_vm_name | lower | regex_replace('[^a-z0-9]+', '-') ) | regex_replace('^-+|-+$', '') }}"
+    windows_env_prefix: "WINDOWS_{{ (windows_vm_name | upper | regex_replace('[^A-Z0-9]+', '_')) }}"
+    windows_env_endpoint_var: "{{ windows_env_prefix }}_OTEL_ENDPOINT"
+    windows_env_token_var: "{{ windows_env_prefix }}_OTEL_TOKEN"
+    windows_portforward_service: "{{ windows_vm_name }}-winrm-https"
+    windows_portforward_log: "/tmp/winrm-{{ windows_vm_name | lower }}-https.log"
+    windows_portforward_pid: "/tmp/winrm-{{ windows_vm_name | lower }}-https.pid"
+
+- name: Determine Windows exporter collector sets
+  ansible.builtin.set_fact:
+    windows_collectors_enabled: "{{ (['cpu', 'cs', 'logical_disk', 'net', 'os', 'service', 'system'] + (enable_sql_collector | ternary(['sql'], []))) | list }}"
+    windows_collect_params: ['cpu', 'cs', 'logical_disk', 'net', 'os', 'service', 'system']
+
+- name: Use provided Windows VM address when available
+  ansible.builtin.set_fact:
+    windows_collector_address: "{{ windows_vm_address | trim }}"
+  when: windows_vm_address | default('') | length > 0
+
+- name: Discover Windows VM address from KubeVirt
+  ansible.builtin.command: >
+    kubectl get vmi {{ windows_vm_name }} -n {{ windows_vm_namespace }} -o jsonpath='{.status.interfaces[0].ipAddress}'
+  register: windows_vm_ip_discovery
+  changed_when: false
+  when: windows_vm_address | default('') | length == 0
+
+- name: Register discovered Windows VM address
+  ansible.builtin.set_fact:
+    windows_collector_address: "{{ windows_vm_ip_discovery.stdout | default('') | trim }}"
+  when: windows_vm_address | default('') | length == 0
+
+- name: Validate resolved Windows VM address
+  ansible.builtin.assert:
+    that:
+      - windows_collector_address | default('') | length > 0
+    fail_msg: "Unable to determine address for Windows VM {{ windows_vm_name }}"
+
+- name: Start WinRM HTTPS port-forward for Windows exporter configuration
+  ansible.builtin.command:
+    cmd: "{{ playbook_dir }}/library/start_portforward.sh {{ windows_portforward_service }} 5986 {{ windows_vm_namespace }} {{ windows_portforward_log }} {{ windows_portforward_pid }}"
+  async: 10
+  poll: 0
+  changed_when: false
+
+- name: Wait for WinRM HTTPS port-forward
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 5986
+    delay: 2
+    timeout: 40
+
+- name: Define Windows WinRM connection variables
+  ansible.builtin.set_fact:
+    windows_winrm_connection:
+      ansible_connection: winrm
+      ansible_user: "{{ windows_admin_username }}"
+      ansible_password: "{{ windows_admin_password }}"
+      ansible_host: localhost
+      ansible_winrm_transport: ssl
+      ansible_winrm_server_cert_validation: ignore
+      ansible_winrm_port: 5986
+      ansible_winrm_scheme: https
+  no_log: true
+
+- name: Confirm WinRM connectivity to Windows VM
+  ansible.windows.win_command:
+    command: hostname
+  register: windows_hostname_check
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Ensure Windows telemetry working directories exist
+  ansible.windows.win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - C:\\Data
+    - C:\\Data\\temp
+    - C:\\Data\\windows_exporter
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Compute Windows exporter download paths
+  ansible.builtin.set_fact:
+    windows_exporter_download_url: "https://github.com/prometheus-community/windows_exporter/releases/download/v{{ windows_exporter_version }}/windows_exporter-{{ windows_exporter_version }}-amd64.zip"
+    windows_exporter_download_path: "C:\\Data\\temp\\windows_exporter-{{ windows_exporter_version }}-amd64.zip"
+    windows_exporter_extract_path: "C:\\Data\\temp\\windows_exporter_extract"
+    windows_exporter_install_dir: "C:\\Data\\windows_exporter"
+
+- name: Download and install Prometheus Windows exporter
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $downloadUrl = "{{ windows_exporter_download_url }}"
+    $downloadPath = "{{ windows_exporter_download_path }}"
+    $extractPath = "{{ windows_exporter_extract_path }}"
+    $installDir = "{{ windows_exporter_install_dir }}"
+    $binary = Join-Path $installDir 'windows_exporter.exe'
+    $currentVersion = ''
+    if (Test-Path $binary) {
+      $info = Get-Item $binary
+      $currentVersion = $info.VersionInfo.FileVersion
+    }
+    if (-not $currentVersion -or -not $currentVersion.StartsWith("{{ windows_exporter_version }}")) {
+      Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+      if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
+      Expand-Archive -LiteralPath $downloadPath -DestinationPath $extractPath -Force
+      $exe = Get-ChildItem -Path $extractPath -Recurse -Filter windows_exporter.exe | Select-Object -First 1
+      if (-not $exe) { throw 'windows_exporter.exe not found after extraction' }
+      New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+      Copy-Item -Path $exe.FullName -Destination $binary -Force
+    }
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Prepare Windows exporter service arguments
+  ansible.builtin.set_fact:
+    windows_exporter_argument_list: "{{ ['--telemetry.addr=:' ~ windows_exporter_port, '--telemetry.path=/metrics', '--collectors.enabled=' ~ (windows_collectors_enabled | join(','))] + (enable_sql_collector | ternary(['--collector.sql.instances=' ~ mssql_instance_name], [])) }}"
+    windows_exporter_arguments: "{{ windows_exporter_argument_list | join(' ') }}"
+
+- name: Configure Windows exporter service
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $installDir = "{{ windows_exporter_install_dir }}"
+    $binary = Join-Path $installDir 'windows_exporter.exe'
+    if (-not (Test-Path $binary)) { throw "windows_exporter executable not found at $binary" }
+    $arguments = "{{ windows_exporter_arguments }}"
+    $binPathValue = "`"$binary`" $arguments"
+    $service = Get-Service -Name 'windows_exporter' -ErrorAction SilentlyContinue
+    if ($service) {
+      if ($service.Status -eq 'Running') { Stop-Service -Name 'windows_exporter' -Force }
+      sc.exe config windows_exporter binPath= "$binPathValue" | Out-Null
+    } else {
+      New-Service -Name 'windows_exporter' -BinaryPathName $binPathValue -DisplayName 'Prometheus Windows Exporter' -StartupType Automatic | Out-Null
+    }
+    Set-Service -Name 'windows_exporter' -StartupType Automatic
+    Start-Service -Name 'windows_exporter'
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Ensure firewall allows Windows exporter port
+  ansible.windows.win_firewall_rule:
+    name: "Windows Exporter {{ windows_exporter_port }}"
+    localport: "{{ windows_exporter_port }}"
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Verify Windows exporter responding locally
+  ansible.windows.win_uri:
+    url: "http://localhost:{{ windows_exporter_port }}/metrics?collect[]=cpu"
+    method: GET
+    status_code: 200
+  register: windows_exporter_probe
+  retries: 5
+  delay: 3
+  until: windows_exporter_probe.status_code == 200
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Prepare Windows collector identifiers for central pipeline
+  ansible.builtin.set_fact:
+    windows_receiver_name: "prometheus/windows-{{ windows_collector_slug }}"
+    windows_exporter_name_id: "otlphttp/windows-{{ windows_collector_slug }}"
+    windows_pipeline_name: "metrics/windows-{{ windows_collector_slug }}"
+
+- name: Merge Windows scrape pipeline into collector configuration
+  ansible.builtin.set_fact:
+    otel_config: "{{ otel_config | combine(windows_config_fragment, recursive=True) }}"
+  vars:
+    windows_config_fragment: >-
+      {{ {
+          'receivers': {
+            windows_receiver_name: {
+              'config': {
+                'scrape_configs': [
+                  {
+                    'job_name': 'windows-' ~ windows_collector_slug,
+                    'scrape_interval': '30s',
+                    'metrics_path': '/metrics',
+                    'params': {
+                      'collect[]': windows_collect_params
+                    },
+                    'static_configs': [
+                      {
+                        'targets': [ windows_collector_address ~ ':' ~ (windows_exporter_port | string) ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          'exporters': {
+            windows_exporter_name_id: {
+              'endpoint': '${' ~ windows_env_endpoint_var ~ '}',
+              'headers': {
+                'Authorization': 'Bearer ${' ~ windows_env_token_var ~ '}'
+              },
+              'tls': {
+                'insecure': True
+              }
+            }
+          },
+          'service': {
+            'pipelines': {
+              windows_pipeline_name: {
+                'receivers': [ windows_receiver_name ],
+                'processors': [ 'batch' ],
+                'exporters': [ windows_exporter_name_id ]
+              }
+            }
+          }
+        } }}
+
+- name: Track configured Windows collector details
+  ansible.builtin.set_fact:
+    configured_windows_collectors: "{{ (configured_windows_collectors | default([], true) | rejectattr('vm_name', 'equalto', windows_vm_name) | list) + [ {
+      'name': windows_collector_name,
+      'vm_name': windows_vm_name,
+      'namespace': windows_vm_namespace,
+      'address': windows_collector_address,
+      'metrics_port': windows_exporter_port,
+      'collectors': windows_collectors_enabled,
+      'slug': windows_collector_slug,
+      'otel_endpoint': windows_otel_endpoint
+    } ] }}"
+
+- name: Append Windows exporter credentials for deployment env vars
+  ansible.builtin.set_fact:
+    otel_env_vars: "{{ (otel_env_vars | rejectattr('name', 'equalto', windows_env_endpoint_var) | rejectattr('name', 'equalto', windows_env_token_var) | list) + [
+      { 'name': windows_env_endpoint_var, 'value': windows_otel_endpoint },
+      { 'name': windows_env_token_var, 'value': windows_otel_token }
+    ] }}"
+  no_log: true
+
+- name: Stop WinRM HTTPS port-forward
+  ansible.builtin.shell: |
+    if [ -f "{{ windows_portforward_pid }}" ]; then
+      kill $(cat "{{ windows_portforward_pid }}") 2>/dev/null || true
+      rm -f "{{ windows_portforward_pid }}"
+    fi
+    pkill -f "port-forward.*{{ windows_portforward_service }}.*5986" 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Show Windows telemetry configuration summary
+  ansible.builtin.debug:
+    msg:
+      - "Windows telemetry configured for VM '{{ windows_vm_name }}' using prometheus scrape model"
+      - "WinRM hostname: {{ windows_hostname_check.stdout | default('unknown-host') }}"
+      - "Exporter listen: http://{{ windows_collector_address }}:{{ windows_exporter_port }}"
+      - "Collectors enabled: {{ windows_collectors_enabled | join(', ') }}"
+      - "Admin credential source: {{ windows_admin_password_source | default('unknown') }}"
+      - "Metrics forwarded to: {{ windows_otel_endpoint }}"
+

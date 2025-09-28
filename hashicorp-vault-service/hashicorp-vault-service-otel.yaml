@@ -7,8 +7,8 @@
     dest: /tmp/vault-otel-collector-deployment.yaml
     mode: '0644'
   vars:
-    otel_token: "{{ otel_token }}"
-    otel_endpoint: "{{ otel_endpoint }}"
+    vault_otel_token: "{{ vault_otel_token | default(otel_token | default('')) }}"
+    vault_otel_endpoint: "{{ vault_otel_endpoint | default(otel_endpoint | default('')) }}"
 
 - name: Apply OTel Collector Deployment and Service
   kubernetes.core.k8s:

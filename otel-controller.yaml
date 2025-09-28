@@ -2,7 +2,13 @@
 # otel-controller.yaml
 # Ansible playbook to control OTel Collector lifecycle and configuration
 # Usage:
-#   ansible-playbook otel-controller.yaml -e action=install -e otel_token=... -e otel_endpoint=...
+#   ansible-playbook otel-controller.yaml -e action=install \
+#       -e otel_install_components='["collector","vault"]' \
+#   ansible-playbook otel-controller.yaml -e action=install \
+#       -e component="collector,vault" \
+#       -e vault_otel_endpoint=https://vault-otel-endpoint.example.com \
+#       -e vault_otel_token=VAULT_TOKEN_VALUE \
+#       -e redhat_vm_name=rhel9-vm -e redhat_vm_namespace=default -e redhat_otel_endpoint=https://observe.example.com/v2/otel -e redhat_otel_token=OBSERVE_TOKEN
 #   ansible-playbook otel-controller.yaml -e action=uninstall
 #   ansible-playbook otel-controller.yaml -e action=status
 
@@ -10,15 +16,142 @@
   gather_facts: false
   vars:
   tasks:
-    - name: Set OTel controller facts
-      set_fact:
-        otel_namespace: "default"
-        otel_token: "{{ otel_token | default('') }}"
-        otel_endpoint: "{{ otel_endpoint | default('') }}"
+    - name: Ensure OTel namespace default
+      ansible.builtin.set_fact:
+        otel_namespace: "{{ otel_namespace | default('default') }}"
+
+    - name: Capture OTel component selection input
+      ansible.builtin.set_fact:
+        otel_install_components_raw: "{{ otel_install_components }}"
+      when: otel_install_components is defined
+
+    - name: Capture OTel component selection from alias
+      ansible.builtin.set_fact:
+        otel_install_components_raw: "{{ component }}"
+      when: otel_install_components is not defined and component is defined
+
+    - name: Default OTel component selection
+      ansible.builtin.set_fact:
+        otel_install_components_raw: "{{ otel_install_components_raw | default('collector') }}"
+
+    - name: Normalize OTel components from YAML or JSON string
+      ansible.builtin.set_fact:
+        otel_install_components: "{{ otel_install_components_raw | from_yaml }}"
+      when: otel_install_components_raw is string and ("[" in otel_install_components_raw or "{" in otel_install_components_raw)
+
+    - name: Normalize OTel components from comma-separated string
+      ansible.builtin.set_fact:
+        otel_install_components: "{{ otel_install_components_raw.split(',') | map('trim') | reject('equalto', '') | list }}"
+      when: otel_install_components_raw is string and otel_install_components_raw is not none and ("[" not in otel_install_components_raw and "{" not in otel_install_components_raw)
+
+    - name: Normalize OTel components when already a list
+      ansible.builtin.set_fact:
+        otel_install_components: "{{ otel_install_components_raw }}"
+      when: otel_install_components_raw is sequence and otel_install_components_raw is not string
+
+    - name: Ensure OTel component list defaults to collector when empty
+      ansible.builtin.set_fact:
+        otel_install_components: [ 'collector' ]
+      when: otel_install_components is not defined or otel_install_components | length == 0
+
+    - name: Normalize OTel controller inputs
+      ansible.builtin.set_fact:
+        otel_collector_image: "{{ otel_collector_image | default('otel/opentelemetry-collector-contrib:0.133.0') }}"
+        vault_otel_endpoint: "{{ vault_otel_endpoint | default('') }}"
+        vault_otel_token: "{{ vault_otel_token | default('') }}"
+        oracle_otel_endpoint: "{{ oracle_otel_endpoint | default('') }}"
+        oracle_otel_token: "{{ oracle_otel_token | default('') }}"
+
+    - name: Default Windows telemetry inputs
+      ansible.builtin.set_fact:
+        windows_vm_name: "{{ windows_vm_name | default(vmName | default('')) }}"
+        windows_vm_namespace: "{{ windows_vm_namespace | default(kubevirt_namespace | default('default')) }}"
+        windows_vm_address: "{{ windows_vm_address | default('') }}"
+        windows_admin_username: "{{ windows_admin_username | default('Administrator') }}"
+        windows_admin_password: "{{ windows_admin_password | default('') }}"
+        windows_admin_password_vault_path: "{{ windows_admin_password_vault_path | default(windows_vault_secret | default(vault_secret | default(''))) }}"
+        windows_otel_endpoint: "{{ windows_otel_endpoint | default('') }}"
+        windows_otel_token: "{{ windows_otel_token | default('') }}"
+        windows_exporter_port: "{{ windows_exporter_port | default(9182) }}"
+        windows_exporter_version: "{{ windows_exporter_version | default('0.24.0') }}"
+        vault_addr: "{{ vault_addr | default('http://localhost:8200') }}"
+        vault_token: "{{ vault_token | default('') }}"
+        vault_namespace: "{{ vault_namespace | default('') }}"
+
+    - name: Default MSSQL telemetry inputs
+      ansible.builtin.set_fact:
+        mssql_instance_name: "{{ mssql_instance_name | default('MSSQLSERVER') }}"
+        mssql_admin_username: "{{ mssql_admin_username | default(windows_admin_username | default('Administrator')) }}"
+        mssql_admin_password_vault_path: "{{ mssql_admin_password_vault_path | default(windows_admin_password_vault_path | default('')) }}"
+        mssql_sa_password_vault_path: "{{ mssql_sa_password_vault_path | default('') }}"
+        mssql_sa_username: "{{ mssql_sa_username | default('sa') }}"
+        mssql_sa_password: "{{ mssql_sa_password | default('') }}"
+        mssql_otel_endpoint: "{{ mssql_otel_endpoint | default(windows_otel_endpoint | default('')) }}"
+        mssql_otel_token: "{{ mssql_otel_token | default(windows_otel_token | default('')) }}"
+
+    - name: Align Windows admin username with MSSQL credentials when applicable
+      ansible.builtin.set_fact:
+        windows_admin_username: "{{ mssql_admin_username }}"
+      when:
+        - mssql_admin_username | default('') | length > 0
+        - (windows_admin_username | default('') | lower) == 'administrator'
+
+    - name: Default Red Hat telemetry inputs
+      ansible.builtin.set_fact:
+        redhat_vm_name: "{{ redhat_vm_name | default('') }}"
+        redhat_vm_namespace: "{{ redhat_vm_namespace | default('default') }}"
+        redhat_vm_metrics_port: "{{ redhat_vm_metrics_port | default(9100) }}"
+        redhat_vm_address: "{{ redhat_vm_address | default('') }}"
+        redhat_vm_username: "{{ redhat_vm_username | default(redhat_user | default('')) }}"
+        redhat_vm_password: "{{ redhat_vm_password | default(user_password | default('')) }}"
+        redhat_otel_endpoint: "{{ redhat_otel_endpoint | default('') }}"
+        redhat_otel_token: "{{ redhat_otel_token | default('') }}"
+
+    - name: Default Oracle telemetry inputs
+      ansible.builtin.set_fact:
+        oracle_vm_name: "{{ oracle_vm_name | default('') }}"
+        oracle_vm_namespace: "{{ oracle_vm_namespace | default(redhat_vm_namespace | default('default')) }}"
+        oracle_vm_address: "{{ oracle_vm_address | default('') }}"
+        oracle_listener_port: "{{ oracle_listener_port | default(1521) }}"
+        oracle_sid: "{{ oracle_sid | default('FREE') }}"
+        oracle_pdb_name: "{{ oracle_pdb_name | default('FREEPDB1') }}"
+        oracle_service_name: "{{ oracle_service_name | default(oracle_pdb_name | default('FREEPDB1')) }}"
+        oracle_app_username: "{{ oracle_app_username | default('appuser') }}"
+        oracle_admin_password: "{{ oracle_admin_password | default('') }}"
+        oracle_metrics_username: "{{ oracle_metrics_username | default(oracle_app_username | default('appuser')) }}"
+        oracle_metrics_password: "{{ oracle_metrics_password | default(oracle_admin_password | default('')) }}"
+
+    - name: Determine selected OTel components
+      ansible.builtin.set_fact:
+        install_collector: "{{ 'collector' in otel_install_components }}"
+        install_vault: "{{ 'vault' in otel_install_components }}"
+        install_redhat: "{{ 'redhat' in otel_install_components }}"
+        install_oracle: "{{ 'oracle' in otel_install_components }}"
+        install_windows: "{{ 'windows' in otel_install_components }}"
+        install_mssql: "{{ 'mssql' in otel_install_components }}"
+
+    - name: Ensure Windows component enabled when MSSQL selected
+      ansible.builtin.set_fact:
+        install_windows: true
+        otel_install_components: "{{ otel_install_components + ['windows'] if 'windows' not in otel_install_components else otel_install_components }}"
+      when: install_mssql and not install_windows
+
+    - name: Ensure collector component present when enabling other pipelines
+      ansible.builtin.assert:
+        that:
+          - install_collector or (not install_vault and not install_redhat and not install_oracle and not install_windows and not install_mssql)
+        fail_msg: "Collector must be included when enabling Vault, Red Hat, Oracle, Windows, or MSSQL telemetry."
+      when: action == 'install'
 
     - name: Run OTel install tasks
-      include_tasks: otel/otel-install.yaml
+      include_tasks: otel/otel-collector-install.yaml
       when: action == 'install'
+      vars:
+        include_vault: "{{ install_vault }}"
+        include_redhat: "{{ install_redhat }}"
+        include_oracle: "{{ install_oracle }}"
+        include_windows: "{{ install_windows }}"
+        include_mssql: "{{ install_mssql }}"
 
     - name: Run OTel uninstall tasks
       include_tasks: otel/otel-uninstall.yaml
