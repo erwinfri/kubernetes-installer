@@ -14,12 +14,17 @@ import os
 import subprocess
 import json
 import yaml
+from pathlib import Path
 
 
 # Import canonical log_queue (no fallback, must be shared)
 from modules.utils.logging_config import log_queue
 
 logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_DIR = REPO_ROOT / 'manifest-controller'
+KUBERNETES_DIR = REPO_ROOT / 'kubernetes'
 
 class KubernetesCRDTUI:
     """Enhanced TUI interface with full functionality"""
@@ -78,7 +83,7 @@ class KubernetesCRDTUI:
             self.add_log_line(f"❌ Error: TUI loop not initialized - cannot show menu")
             return
         
-        folder = '/root/kubernetes-installer/manifest-controller'
+        folder = str(MANIFEST_DIR)
         if not os.path.exists(folder):
             self.add_log_line(f"❌ manifest-controller folder not found: {folder}")
             return
@@ -126,14 +131,27 @@ class KubernetesCRDTUI:
 
         walker = urwid.SimpleFocusListWalker(menu_items)
         listbox = urwid.ListBox(walker)
+
+        # Split title into frame title and subtitle to avoid duplicate text
+        frame_title = title
+        subtitle = title
+        for separator in (' - ', ':'):
+            if separator in title:
+                frame_part, subtitle_part = title.split(separator, 1)
+                frame_title = frame_part.strip() or frame_title
+                subtitle = subtitle_part.strip() or subtitle
+                break
+        if subtitle == title or not subtitle:
+            subtitle = 'Select an option'
+
         popup_content = urwid.Pile([
-            urwid.Text(('header', title), align='center'),
+            urwid.Text(('header', subtitle), align='center'),
             urwid.Divider(),
             urwid.BoxAdapter(listbox, height=len(menu_items) + 2),
             urwid.Divider(),
             urwid.Text("Use ↑↓ arrows and Enter to select, ESC to cancel", align='center')
         ])
-        dialog = urwid.LineBox(popup_content, title=title)
+        dialog = urwid.LineBox(popup_content, title=frame_title)
         overlay = urwid.Overlay(
             dialog,
             self.main_frame,
@@ -210,6 +228,7 @@ class KubernetesCRDTUI:
             ('Clear Logs', self.clear_logs),
             ('Quit', self.quit_app)
         ]
+
         menu_buttons = []
         for label, callback in menu_items:
             btn = urwid.Button(label, on_press=callback)
@@ -219,7 +238,6 @@ class KubernetesCRDTUI:
         menu_bar = urwid.Columns(menu_buttons, dividechars=1)
         menu_frame = urwid.AttrMap(menu_bar, 'menu')
 
-        # Main layout
         top_section = urwid.Pile([
             ('pack', header),
             ('pack', urwid.Text("")),
@@ -297,7 +315,7 @@ class KubernetesCRDTUI:
         
         try:
             # Get CRD files from manifest-controller folder
-            folder = '/root/kubernetes-installer/manifest-controller'
+            folder = str(MANIFEST_DIR)
             if not os.path.exists(folder):
                 self.status_walker.append(urwid.Text(('log_error', '❌ manifest-controller folder not found')))
                 return
@@ -515,7 +533,7 @@ class KubernetesCRDTUI:
         crd_names_in_folder = set()
         crd_count = 0
         try:
-            folder = '/root/kubernetes-installer/manifest-controller'
+            folder = str(MANIFEST_DIR)
             files = os.listdir(folder)
             crd_files = [f for f in files if f.endswith('.yaml') and 'crd' in f.lower()]
             crd_count = len(crd_files)
@@ -1020,23 +1038,22 @@ class KubernetesCRDTUI:
         self.add_log_line("⚙️ Checking for configuration...")
     
     def handle_dynamic_delete_selection(self, service_key):
-        
-        folder = '/root/kubernetes-installer/manifest-controller'
+        folder = str(MANIFEST_DIR)
         if not os.path.exists(folder):
             self.add_log_line(f"❌ manifest-controller folder not found: {folder}")
             return
-            
+
         files = os.listdir(folder)
         cr_files = [f for f in files if f.endswith('.yaml') and 'crd' not in f.lower()]
-        
+
         if not cr_files:
             self.add_log_line("❌ No CR files found in manifest-controller folder")
             return
 
         def handle_cr_delete_selection(cr_name, cr_path):
             import subprocess
-            self.add_log_line(f"�️ Deleting CR: {cr_name}...")
-            
+            self.add_log_line(f"🗑️ Deleting CR: {cr_name}...")
+
             result = subprocess.run(['kubectl', 'delete', '-f', cr_path], capture_output=True, text=True)
             if result.returncode == 0:
                 self.add_log_line(f"✅ CR deleted successfully: {cr_name}")
@@ -1057,6 +1074,7 @@ class KubernetesCRDTUI:
                 self.cr_path = cr_path
                 self.callback = callback
                 self.tui = tui_instance
+
             def keypress(self, size, key):
                 if key in ('enter', ' '):
                     self.tui.close_popup()
@@ -1259,9 +1277,17 @@ class KubernetesCRDTUI:
         if len(menu_walker) > 0:
             menu_listbox.focus_position = 0
         
+        # Derive a one-line subtitle for the popup body without repeating the frame title
+        subtitle_text = title
+        if ' - ' in title:
+            subtitle_text = title.split(' - ', 1)[1].strip()
+        elif ':' in title:
+            subtitle_text = title.split(':', 1)[1].strip()
+        subtitle_text = subtitle_text if subtitle_text and subtitle_text != title else 'Select an option'
+
         # Create popup content
         popup_content = urwid.Pile([
-            urwid.Text(('popup_title', f"🔽 {title}"), align='center'),
+            urwid.Text(('popup_title', f"🔽 {subtitle_text}"), align='center'),
             urwid.Divider('─'),
             urwid.BoxAdapter(menu_listbox, height=min(len(menu_items), 8)),
             urwid.Divider('─'),
@@ -2343,7 +2369,7 @@ class KubernetesCRDTUI:
         self.add_log_line(f"🔧 Method: {self.selected_method}")
         self.add_log_line("")
         try:
-            folder = '/root/kubernetes-installer/manifest-controller'
+            folder = str(MANIFEST_DIR)
             files = os.listdir(folder)
             cr_files = [f for f in files if f.endswith('.yaml') and 'crd' not in f.lower()]
             if cr_files:
@@ -2535,11 +2561,11 @@ class KubernetesCRDTUI:
             cr_file_path = None
             if 'file' in cr_data:
                 filename = cr_data['file']
-                cr_file_path = f"/root/kubernetes-installer/manifest-controller/{filename}"
+                cr_file_path = str(MANIFEST_DIR / filename)
             else:
                 possible_paths = [
-                    f"/root/kubernetes-installer/manifest-controller/{cr_name}-cr.yaml",
-                    f"/root/kubernetes-installer/manifest-controller/{cr_name}.yaml"
+                    str(MANIFEST_DIR / f"{cr_name}-cr.yaml"),
+                    str(MANIFEST_DIR / f"{cr_name}.yaml")
                 ]
                 for path in possible_paths:
                     if os.path.exists(path):
@@ -2616,7 +2642,7 @@ class KubernetesCRDTUI:
                     
                     playbook = playbook_map.get(service_name)
                     if playbook:
-                        playbook_path = f"/root/kubernetes-installer/kubernetes/{playbook}"
+                        playbook_path = str(KUBERNETES_DIR / playbook)
                         if os.path.exists(playbook_path):
                             self.add_log_line(f"🎭 Running uninstall playbook...")
                             result = subprocess.run(['ansible-playbook', playbook_path], 
@@ -2652,11 +2678,11 @@ class KubernetesCRDTUI:
                 cr_file_path = None
                 if 'file' in cr_data:
                     filename = cr_data['file']
-                    cr_file_path = f"/root/kubernetes-installer/manifest-controller/{filename}"
+                    cr_file_path = str(MANIFEST_DIR / filename)
                 else:
                     possible_paths = [
-                        f"/root/kubernetes-installer/manifest-controller/{cr_name}-cr.yaml",
-                        f"/root/kubernetes-installer/manifest-controller/{cr_name}.yaml"
+                        str(MANIFEST_DIR / f"{cr_name}-cr.yaml"),
+                        str(MANIFEST_DIR / f"{cr_name}.yaml")
                     ]
                     for path in possible_paths:
                         if os.path.exists(path):

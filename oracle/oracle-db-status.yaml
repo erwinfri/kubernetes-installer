@@ -4,32 +4,54 @@
   hosts: localhost
   gather_facts: no
   vars:
-    vm_name: "{{ vm_name | default('oracle-vm') }}"
-    kind: "{{ kind | default('VirtualMachine') }}"
-    kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
-    oracle_vault_secret: "{{ oracle_vault_secret | default('secret/data/oracle-vm/admin') }}"
-    oracle_user: "{{ oracle_user | default('oracle') }}"
-    oracle_password: "{{ oracle_password | default('Oracle123') }}"
-    oracle_admin_password: "{{ oracle_admin_password | default('Oracle123') }}"
+    vm_name: "oracle-vm"
+    kind: "VirtualMachine"
+    kubevirt_namespace: "default"
+    oracle_vault_secret: "secret/data/oracle-vm/admin"
+    oracle_user: "oracle"
+    oracle_password: "Oracle123"
+    oracle_admin_password: "Oracle123"
+    # Oracle environment variables - consolidated for reuse  
+    oracle_env:
+      ORACLE_HOME: /opt/oracle/product/23ai/dbhomeFree
+      ORACLE_SID: FREE
+      ORACLE_BASE: /opt/oracle
+      TNS_ADMIN: /opt/oracle/product/23ai/dbhomeFree/network/admin
+      PATH: "/opt/oracle/product/23ai/dbhomeFree/bin:/usr/local/bin:/usr/bin:/bin:/sbin"
+    oracle_pdb_name: FREEPDB1
+    oracle_listener_port: 1521
+    oracle_app_username: appuser
 
   pre_tasks:
-    - name: Set kubevirt_namespace default if not provided
+    - name: Install required packages for Oracle status operations
+      ansible.builtin.dnf:
+        name:
+          - sshpass
+        state: present
+      become: true
+
+    - name: Find port-forward script location
+      ansible.builtin.find:
+        paths:
+          - "{{ playbook_dir }}/library"
+          - "{{ playbook_dir }}/../library"
+        patterns: "start_portforward.sh"
+        file_type: file
+      register: portforward_script_search
+
+    - name: Set port-forward script path
       ansible.builtin.set_fact:
-        kubevirt_namespace: "{{ kubevirt_namespace | default('default') }}"
+        portforward_script_path: "{{ portforward_script_search.files[0].path }}"
+      when: portforward_script_search.files | length > 0
 
-    - name: Ensure port-forward script exists and is executable
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/library/start_portforward.sh"
-      register: portforward_script_stat
-
-    - name: Fail if port-forward script is missing or not executable
+    - name: Fail if port-forward script not found
       ansible.builtin.fail:
-        msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
-      when: not portforward_script_stat.stat.exists or not portforward_script_stat.stat.mode|int is search('7')
+        msg: "Port-forward script not found in expected locations"
+      when: portforward_script_search.files | length == 0
 
     - name: Port-forward Vault service for local access
       ansible.builtin.shell: |
-        ./library/start_portforward.sh vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
+        {{ portforward_script_path }} vault 8200 default /tmp/vault-portforward.log /tmp/vault-portforward.pid
         sleep 5
       async: 10
       poll: 0
@@ -81,21 +103,31 @@
       when: vault_oracle_pw.rc == 0 and vault_oracle_pw.stdout | trim | length > 0
 
   tasks:
+    - name: Set actual runtime parameters (command line takes precedence)
+      ansible.builtin.set_fact:
+        runtime_vm_name: "{{ vm_name }}"
+        runtime_kind: "{{ kind }}"
+        runtime_kubevirt_namespace: "{{ kubevirt_namespace }}"
+        runtime_oracle_vault_secret: "{{ oracle_vault_secret }}"
+        runtime_oracle_user: "{{ oracle_user }}"
+        runtime_oracle_password: "{{ oracle_password }}"
+        runtime_oracle_admin_password: "{{ oracle_admin_password }}"
+
     - name: Display Oracle VM status check information
       ansible.builtin.debug:
         msg:
           - "🔍 Oracle VM Status Check"
-          - "VM Name: {{ vm_name }}"
-          - "Namespace: {{ kubevirt_namespace }}"
-          - "Oracle User: {{ oracle_user }}"
-          - "Vault Secret Path: {{ oracle_vault_secret }}"
+          - "VM Name: {{ runtime_vm_name }}"
+          - "Namespace: {{ runtime_kubevirt_namespace }}"
+          - "Oracle User: {{ runtime_oracle_user }}"
+          - "Vault Secret Path: {{ runtime_oracle_vault_secret }}"
 
     - name: Check if target VM exists and is running
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
-        name: "{{ vm_name }}"
-        namespace: "{{ kubevirt_namespace }}"
+        name: "{{ runtime_vm_name }}"
+        namespace: "{{ runtime_kubevirt_namespace }}"
       register: target_vmi
 
     - name: Get Oracle VM status
@@ -109,21 +141,27 @@
           ansible.builtin.debug:
             msg:
               - "VM Basic Status:"
-              - "  Name: {{ vm_name }}"
+              - "  Name: {{ runtime_vm_name }}"
               - "  Status: {{ target_vmi.resources[0].status.phase }}"
               - "  IP: {{ vm_ip | default('Not Available') }}"
               - "  Node: {{ target_vmi.resources[0].status.nodeName | default('Not Available') }}"
 
+        - name: Add VM host key to known_hosts
+          ansible.builtin.command:
+            cmd: "ssh-keyscan -H {{ vm_ip }} >> ~/.ssh/known_hosts"
+          when: vm_ip is defined
+          ignore_errors: true
+
         - name: Add VM to temporary inventory for Oracle status check
           ansible.builtin.add_host:
-            name: "{{ vm_name }}"
+            name: "{{ runtime_vm_name }}"
             ansible_host: "{{ vm_ip }}"
-            ansible_user: "{{ oracle_user }}"
-            ansible_password: "{{ oracle_admin_password }}"
+            ansible_user: "redhat"
+            ansible_password: "redhat"
             ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
             ansible_become: true
             ansible_become_method: sudo
-            ansible_become_password: "{{ oracle_admin_password }}"
+            ansible_become_password: "redhat"
           when: vm_ip is defined
 
         - name: Check Oracle Database status on target VM
@@ -142,23 +180,53 @@
 
             - name: Check Oracle listener status
               ansible.builtin.shell: |
-                source /home/oracle/.bash_profile
+                export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}
+                export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH
+                export TNS_ADMIN={{ oracle_env.TNS_ADMIN }}
                 lsnrctl status
               become: true
               become_user: oracle
               register: listener_status
               failed_when: false
 
-            - name: Check Oracle Database status
+            - name: Check Oracle Database status (CDB)
               ansible.builtin.shell: |
-                source /home/oracle/.bash_profile
-                sqlplus -S / as sysdba <<EOF
-                SELECT status FROM v\$instance;
-                EXIT;
-                EOF
+                export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}
+                export ORACLE_SID={{ oracle_env.ORACLE_SID }}
+                export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH
+                echo "SELECT 'Database Status: ONLINE' as STATUS, instance_name, status, database_status FROM v\$instance;" | sqlplus -S sys/"{{ oracle_admin_password }}"@localhost:{{ oracle_listener_port }}/{{ oracle_env.ORACLE_SID }} as sysdba
               become: true
               become_user: oracle
-              register: database_status
+              register: db_status
+              failed_when: false
+
+            - name: Check Oracle service status
+              ansible.builtin.systemd:
+                name: oracle-free-23ai
+              register: oracle_service
+              become: true
+              failed_when: false
+
+            - name: Check database connectivity test (PDB)
+              ansible.builtin.shell: |
+                export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}
+                export ORACLE_SID={{ oracle_env.ORACLE_SID }}
+                export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH
+                echo "SELECT 'Connection Test: SUCCESSFUL' as TEST_RESULT FROM dual;" | sqlplus -S {{ oracle_app_username }}/"{{ oracle_admin_password }}"@localhost:{{ oracle_listener_port }}/{{ oracle_pdb_name }}
+              become: true
+              become_user: oracle
+              register: connectivity_test
+              failed_when: false
+
+            - name: Get Oracle tablespace information (CDB root)
+              ansible.builtin.shell: |
+                export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}
+                export ORACLE_SID={{ oracle_env.ORACLE_SID }}
+                export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH
+                echo "SELECT tablespace_name, ROUND(bytes/1024/1024,2) as MB_SIZE, ROUND(maxbytes/1024/1024,2) as MB_MAX FROM dba_data_files ORDER BY tablespace_name;" | sqlplus -S sys/"{{ oracle_admin_password }}"@localhost:{{ oracle_listener_port }}/{{ oracle_env.ORACLE_SID }} as sysdba
+              become: true
+              become_user: oracle
+              register: tablespace_info
               failed_when: false
 
             - name: Check Oracle processes
@@ -167,38 +235,110 @@
               register: oracle_processes
               failed_when: false
 
-            - name: Display comprehensive Oracle status
+            - name: Display comprehensive Oracle 23ai status
               ansible.builtin.debug:
                 msg:
-                  - "🔮 Oracle Database Status Report"
-                  - "=====================================ჩ"
+                  - "🔮 Oracle 23ai Free Edition Status Report"
+                  - "=========================================="
                   - "VM Information:"
                   - "  Name: {{ vm_name }}"
                   - "  IP: {{ vm_ip }}"
                   - "  Connection: {{ 'SSH Successful' if ansible_host is defined else 'SSH Failed' }}"
                   - ""
-                  - "Oracle RPMs:"
-                  - "{{ oracle_rpms.stdout_lines | default(['  Not installed']) | map('regex_replace', '^', '  ') | list | join('\n') }}"
+                  - "📦 Oracle Installation:"
+                  - "{{ oracle_rpms.stdout_lines | default(['  Oracle RPM not installed']) | map('regex_replace', '^', '  ✅ ') | list | join('\n') }}"
                   - ""
-                  - "Oracle Home:"
+                  - "🏠 Oracle Home:"
                   - "  Path: /opt/oracle/product/23ai/dbhomeFree"
-                  - "  Exists: {{ 'Yes' if oracle_home.stat.exists else 'No' }}"
+                  - "  Status: {{ '✅ Exists' if oracle_home.stat.exists else '❌ Missing' }}"
                   - ""
-                  - "Oracle Listener:"
-                  - "  Status: {{ 'Running' if listener_status.rc == 0 else 'Stopped/Error' }}"
-                  - "{{ ('  Details: ' + (listener_status.stdout | regex_search('Listener Parameter File.*') | default('Not available'))) if listener_status.rc == 0 else '  Error: ' + (listener_status.stderr | default('Unknown error')) }}"
+                  - "🔊 Oracle Listener:"
+                  - "  Status: {{ '✅ Running' if listener_status.rc == 0 and 'READY' in listener_status.stdout else '❌ Stopped/Error' }}"
+                  - "  Port: {{ (oracle_listener_port ~ ' (Active)') if (listener_status.rc == 0 and (oracle_listener_port | string) in (listener_status.stdout | default(''))) else 'Not Available' }}"
                   - ""
-                  - "Oracle Database:"
-                  - "  Status: {{ 'Running' if 'OPEN' in database_status.stdout else 'Stopped/Error' }}"
-                  - "{{ ('  Instance Status: ' + (database_status.stdout | regex_search('OPEN|MOUNTED|STARTED') | default('Unknown'))) if database_status.rc == 0 else '  Error: ' + (database_status.stderr | default('Unable to connect')) }}"
+                  - "🗃️  Oracle Database ({{ oracle_env.ORACLE_SID }} / {{ oracle_pdb_name }}):"
+                  - "  Service Status: {{ '✅ Active' if oracle_service.status.ActiveState == 'active' else '❌ Inactive' }}"
+                  - "  Database Status: {{ '✅ Online' if db_status.rc == 0 and 'ONLINE' in db_status.stdout else '❌ Offline/Error' }}"
+                  - "  SID: {{ oracle_env.ORACLE_SID }}"
+                  - "  Connection Test: {{ '✅ Successful' if connectivity_test.rc == 0 and 'SUCCESSFUL' in connectivity_test.stdout else '❌ Failed' }}"
                   - ""
-                  - "Oracle Processes:"
-                  - "{{ (oracle_processes.stdout_lines | default(['  No Oracle processes running']) | map('regex_replace', '^', '  ') | list | join('\n')) if oracle_processes.stdout_lines | length > 0 else '  No Oracle processes running' }}"
+                  - "💾 Tablespace Information:"
+                  - "{{ tablespace_info.stdout_lines[2:] | default(['  Unable to retrieve tablespace info']) | map('regex_replace', '^', '  ') | list | join('\n') if tablespace_info.rc == 0 else '  ❌ Unable to retrieve tablespace information' }}"
                   - ""
-                  - "Connection Information:"
-                  - "  Database SID: FREE"
-                  - "  Connection String: {{ vm_ip }}:1521/FREE"
-                  - "  Service Status: {{ 'Available' if (listener_status.rc == 0 and 'OPEN' in database_status.stdout) else 'Unavailable' }}"
+                  - "🔐 Authentication:"
+                  - "  SYS/SYSTEM Password: {{ '✅ Configured' if db_status.rc == 0 else '❌ Issue' }}"
+                  - "  Application User ({{ oracle_app_username }}): {{ '✅ Available' if connectivity_test.rc == 0 else '❌ Issue' }}"
+                  - ""
+                  - "🌐 Connection Information:"
+                  - "  TNS (CDB): {{ vm_ip }}:{{ oracle_listener_port }}/{{ oracle_env.ORACLE_SID }}"
+                  - "  TNS (PDB): {{ vm_ip }}:{{ oracle_listener_port }}/{{ oracle_pdb_name }}"
+                  - "  Status: {{ '🟢 Ready' if (listener_status.rc == 0 and db_status.rc == 0) else '🔴 Not Ready' }}"
+                  - ""
+                  - "💻 Shell Connection Commands:"
+                  - "  ┌─ Environment Setup (copy & paste) ─"
+                  - "  │ export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}"
+                  - "  │ export ORACLE_SID={{ oracle_env.ORACLE_SID }}"
+                  - "  │ export ORACLE_BASE={{ oracle_env.ORACLE_BASE }}"
+                  - "  │ export TNS_ADMIN={{ oracle_env.TNS_ADMIN }}"
+                  - "  │ export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH"
+                  - "  │ export LD_LIBRARY_PATH={{ oracle_env.ORACLE_HOME }}/lib:$LD_LIBRARY_PATH"
+                  - "  └─────────────────────────────────────"
+                  - ""
+                  - "  ┌─ Connect as SYSDBA (Local) ─"
+                  - "  │ sqlplus / as sysdba"
+                  - "  │ sqlplus sys/{{ oracle_admin_password }} as sysdba"
+                  - "  └─────────────────────────────"
+                  - ""
+                  - "  ┌─ Connect as SYSDBA (Remote) ─"
+                  - "  │ sqlplus sys/{{ oracle_admin_password }}@{{ vm_ip }}:{{ oracle_listener_port }}/{{ oracle_env.ORACLE_SID }} as sysdba"
+                  - "  │ sqlplus sys/{{ oracle_admin_password }}@{{ oracle_env.ORACLE_SID }} as sysdba"
+                  - "  └─────────────────────────────────"
+                  - ""
+                  - "  ┌─ Connect as Application User ─"
+                  - "  │ sqlplus {{ oracle_app_username }}/{{ oracle_admin_password }}@{{ vm_ip }}:{{ oracle_listener_port }}/{{ oracle_pdb_name }}"
+                  - "  │ sqlplus {{ oracle_app_username }}/{{ oracle_admin_password }}@{{ oracle_pdb_name }}"
+                  - "  └───────────────────────────────────"
+                  - ""
+                  - "  ┌─ Quick Database Status Check ─"
+                  - "  │ lsnrctl status"
+                  - "  │ echo 'SELECT instance_name, status FROM v$instance;' | sqlplus -S / as sysdba"
+                  - "  │ echo 'SELECT name, open_mode FROM v$database;' | sqlplus -S / as sysdba"
+                  - "  │ echo 'SELECT tablespace_name, status FROM dba_tablespaces;' | sqlplus -S / as sysdba"
+                  - "  └───────────────────────────────────"
+                  - ""
+                  - "  ┌─ Service Management Commands ─"
+                  - "  │ sudo systemctl status oracle-free-23ai"
+                  - "  │ sudo systemctl start oracle-free-23ai"
+                  - "  │ sudo systemctl stop oracle-free-23ai"
+                  - "  │ sudo systemctl restart oracle-free-23ai"
+                  - "  └─────────────────────────────────"
+                  - ""
+                  - "  ┌─ Complete Connection Script ─"
+                  - "  │ #!/bin/bash"
+                  - "  │ # Oracle 23ai Free Edition Connection Script"
+                  - "  │ export ORACLE_HOME={{ oracle_env.ORACLE_HOME }}"
+                  - "  │ export ORACLE_SID={{ oracle_env.ORACLE_SID }}"
+                  - "  │ export ORACLE_BASE={{ oracle_env.ORACLE_BASE }}"
+                  - "  │ export TNS_ADMIN={{ oracle_env.TNS_ADMIN }}"
+                  - "  │ export PATH={{ oracle_env.ORACLE_HOME }}/bin:$PATH"
+                  - "  │ export LD_LIBRARY_PATH={{ oracle_env.ORACLE_HOME }}/lib:$LD_LIBRARY_PATH"
+                  - "  │ "
+                  - "  │ echo 'Oracle 23ai Environment Ready!'"
+                  - "  │ echo 'Database: {{ oracle_env.ORACLE_SID }} on {{ vm_ip }}:{{ oracle_listener_port }}'"
+                  - "  │ echo 'Connect: sqlplus / as sysdba'"
+                  - "  │ "
+                  - "  │ # Optional: Auto-connect to database"
+                  - "  │ # sqlplus / as sysdba"
+                  - "  └─────────────────────────────────────"
+                  - ""
+                  - ""
+                  - "⚡ Quick Start (minimal commands):"
+                  - "  SSH to VM: ssh {{ oracle_user }}@{{ vm_ip }}"
+                  - "  Set env:   source /home/oracle/.bash_profile"
+                  - "  Connect:   sqlplus / as sysdba"
+                  - "  Or:        sqlplus sys/{{ oracle_admin_password }}@localhost:{{ oracle_listener_port }}/{{ oracle_env.ORACLE_SID }} as sysdba"
+                  - ""
+                  - "📊 Overall Health: {{ '🟢 HEALTHY' if (oracle_home.stat.exists and listener_status.rc == 0 and db_status.rc == 0 and oracle_service.status.ActiveState == 'active') else '🔴 ISSUES DETECTED' }}"
 
           when: vm_ip is defined
 
@@ -207,9 +347,9 @@
     - name: Display status for non-existent VM
       ansible.builtin.debug:
         msg:
-          - "🔍 Oracle VM Status Report"
-          - "=============================="
+          - "🔍 Oracle 23ai Free Edition Status Report"
+          - "========================================"
           - "VM {{ vm_name }} not found in namespace {{ kubevirt_namespace }}"
-          - "Status: Not Created"
-          - "Oracle Database: Not Available"
+          - "Status: ❌ Not Created"
+          - "Oracle Database: ❌ Not Available"
       when: target_vmi.resources | length == 0

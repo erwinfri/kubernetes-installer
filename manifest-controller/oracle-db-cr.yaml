@@ -1,15 +1,29 @@
 apiVersion: infra.example.com/v1
 kind: OracleDB
 metadata:
-  name: oracle-db-demo
+  name: oracle-db-23ai
 spec:
   action: install
-  vm_name: my-rhel-vm
+  kind: VirtualMachine
+  vm_name: rhel9-vm
   kubevirt_namespace: default
-  oracle_vault_secret: secret/data/oracle-vm/admin
+  oracle_vault_secret: secret/data/oracle-db-23ai/admin
   oracle_user: oracle
   oracle_password: "Oracle123"
   oracle_admin_password: "Oracle123"
   oracle_sid: FREE
   oracle_home: /opt/oracle/product/23ai/dbhomeFree
-  oracle_port: 1521
+  oracle_env:
+    ORACLE_HOME: /opt/oracle/product/23ai/dbhomeFree
+    ORACLE_SID: FREE
+    ORACLE_BASE: /opt/oracle
+    TNS_ADMIN: /opt/oracle/product/23ai/dbhomeFree/network/admin
+    PATH: "/opt/oracle/product/23ai/dbhomeFree/bin:/usr/local/bin:/usr/bin:/bin:/sbin"
+  oracle_pdb_name: FREEPDB1
+  oracle_dbca_template: FREE_Database.dbc
+  oracle_dbca_memory_mb: 0
+  oracle_listener_port: 1521
+  oracle_app_username: appuser
+  oracle_app_grants: "CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE SEQUENCE, CREATE SYNONYM, UNLIMITED TABLESPACE"
+  oracle_fast_install: true
+  skip_system_update: true

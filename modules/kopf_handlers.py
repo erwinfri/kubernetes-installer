@@ -23,6 +23,8 @@ import logging
 import subprocess
 import os
 import yaml
+import json
+from pathlib import Path
 from datetime import datetime
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -31,6 +33,8 @@ from kubernetes.client.rest import ApiException
 from modules.utils.logging_config import log_queue
 
 logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Set up operator file logger
 operator_log_path = "/tmp/operator.log"
@@ -119,14 +123,11 @@ def handle_windowsvm(body, meta, spec, status, namespace, diff, old, new, patch,
         patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
     except Exception:
         pass
-    import time
-    max_retries = 5
-    retry_delay = 1  # seconds
     try:
         log_event(f"[OPERATOR] Deciding what to do for action={action} on VM {vm_name}")
         kopf.info(body, reason='Processing', message=f'Starting {action} for VM {vm_name}')
         log_event(f"[OPERATOR] Starting {action} for VM {vm_name}")
-        playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'windows-server-controller.yaml')
         # Collect all relevant variables from spec for playbook
         playbook_vars = {
             'action': action,
@@ -251,7 +252,7 @@ def delete_windowsvm(body, meta, spec, status, namespace, patch, **kwargs):
     patch.status['observedGeneration'] = meta.get('generation')
 
     # Run uninstall playbook
-    playbook_path = "/root/kubernetes-installer/windows-server-controller.yaml"
+    playbook_path = str(REPO_ROOT / 'windows-server-controller.yaml')
     log_event(f"[OPERATOR] Running uninstall playbook for VM {vm_name}")
     result = run_ansible_playbook(playbook_path, {
         'action': 'uninstall',
@@ -286,7 +287,7 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
             log_event(f"Target VM {target_vm} is not ready: {vm_status['message']}. Skipping playbook run.")
             return
         # Run the appropriate Ansible playbook (windows-automation-controller.yaml)
-        playbook_path = "/root/kubernetes-installer/windows-automation-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'windows-automation-controller.yaml')
         log_event(f"Operator: Running Ansible playbook for MSSQL install on VM {target_vm}")
         playbook_vars = {
             'vm_name': target_vm,
@@ -363,7 +364,7 @@ def handle_windowsotelcollector(body, meta, spec, status, namespace, **kwargs):
                 logger.info(f"MSSQL is required for metrics type '{metrics_type}' but not available on VM {target_vm}. Skipping playbook run.")
                 return
         # Run the appropriate Ansible playbook (windows-automation-controller.yaml)
-        playbook_path = "/root/kubernetes-installer/windows-automation-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'windows-automation-controller.yaml')
         log_event(f"Operator: Running Ansible playbook for WindowsOTelCollector install on VM {target_vm}")
         playbook_vars = {
             'vm_name': target_vm,
@@ -417,8 +418,19 @@ def run_ansible_playbook(playbook_path, variables, stream_to_tui=False):
             f.write(inventory_content)
         # Build ansible-playbook command
         cmd = ['ansible-playbook', '-i', '/tmp/ansible_inventory', playbook_path]
+        extra_vars_payload = {}
         for key, value in variables.items():
-            cmd.extend(['--extra-vars', f'{key}={value}'])
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                extra_vars_payload[key] = value
+            elif isinstance(value, (dict, list)):
+                extra_vars_payload[key] = value
+            else:
+                extra_vars_payload[key] = str(value)
+
+        if extra_vars_payload:
+            cmd.extend(['--extra-vars', json.dumps(extra_vars_payload)])
         logger.info(f"[OPERATOR] Running command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
         if log_queue:
             log_queue.put(f"[OPERATOR] Running command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
@@ -505,7 +517,7 @@ def handle_redhatvm(body, meta, spec, status, namespace, diff, old, new, patch, 
     action = get_var('action', spec, 'install')
     vm_name = get_var('vm_name', spec, name)
     kind = get_var('kind', spec, 'VirtualMachine')
-    manifest_path = get_var('manifest_path', spec, '/root/kubernetes-installer/manifest-controller/rhel9-vm-cr.yaml')
+    manifest_path = get_var('manifest_path', spec, str(REPO_ROOT / 'manifest-controller' / 'rhel9-vm-cr.yaml'))
     kubevirt_namespace = get_var('kubevirt_namespace', spec, namespace)
     vm_image = get_var('vm_image', spec, 'registry.redhat.io/rhel9/rhel-guest-image:9.6')
     vm_cpu_cores = get_var('vm_cpu_cores', spec, 2)
@@ -536,7 +548,7 @@ def handle_redhatvm(body, meta, spec, status, namespace, diff, old, new, patch, 
         pass
     try:
         kopf.info(body, reason='Processing', message=f'Starting {action} for Red Hat VM {vm_name}')
-        playbook_path = "/root/kubernetes-installer/redhat-server-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'redhat-server-controller.yaml')
         playbook_vars = {
             'action': action,
             'kind': kind,
@@ -614,13 +626,13 @@ def delete_redhatvm(body, meta, spec, status, namespace, patch, **kwargs):
     name = meta.get('name')
     vm_name = get_var('vmName', spec, name)
     kind = get_var('kind', spec, 'VirtualMachine')
-    manifest_path = get_var('manifest_path', spec, '/root/kubernetes-installer/manifest-controller/rhel9-vm-cr.yaml')
+    manifest_path = get_var('manifest_path', spec, str(REPO_ROOT / 'manifest-controller' / 'rhel9-vm-cr.yaml'))
     kubevirt_namespace = get_var('kubevirt_namespace', spec, namespace)
     patch.status['phase'] = 'Terminating'
     patch.status['message'] = f"Delete requested for Red Hat VM {vm_name}"
     patch.status['reason'] = 'DeleteRequested'
     patch.status['observedGeneration'] = meta.get('generation')
-    playbook_path = "/root/kubernetes-installer/redhat-server-controller.yaml"
+    playbook_path = str(REPO_ROOT / 'redhat-server-controller.yaml')
     log_event(f"[OPERATOR] Running uninstall playbook for Red Hat VM {vm_name}")
     result = run_ansible_playbook(playbook_path, {
         'action': 'uninstall',
@@ -653,6 +665,7 @@ def handle_oracledb(body, meta, spec, status, namespace, diff, old, new, patch, 
     name = meta.get('name')
     action = get_var('action', spec, 'install')
     vm_name = get_var('vm_name', spec, name)
+    kind = get_var('kind', spec, 'VirtualMachine')
     kubevirt_namespace = get_var('kubevirt_namespace', spec, namespace)
     oracle_vault_secret = get_var('oracle_vault_secret', spec, 'secret/data/oracle-vm/admin')
     oracle_user = get_var('oracle_user', spec, 'oracle')
@@ -660,7 +673,37 @@ def handle_oracledb(body, meta, spec, status, namespace, diff, old, new, patch, 
     oracle_admin_password = get_var('oracle_admin_password', spec, 'Oracle123')
     oracle_sid = get_var('oracle_sid', spec, 'FREE')
     oracle_home = get_var('oracle_home', spec, '/opt/oracle/product/23ai/dbhomeFree')
-    oracle_port = get_var('oracle_port', spec, 1521)
+    oracle_listener_port = get_var('oracle_listener_port', spec, 1521)
+    oracle_app_username = get_var('oracle_app_username', spec, 'appuser')
+    oracle_app_grants = get_var('oracle_app_grants', spec, 'CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE SEQUENCE, CREATE SYNONYM, UNLIMITED TABLESPACE')
+    oracle_pdb_name = get_var('oracle_pdb_name', spec, 'FREEPDB1')
+    oracle_dbca_template = get_var('oracle_dbca_template', spec, 'FREE_Database.dbc')
+    oracle_dbca_memory_mb = get_var('oracle_dbca_memory_mb', spec, 0)
+    skip_system_update = get_var('skip_system_update', spec, True)
+    oracle_fast_install = get_var('oracle_fast_install', spec, True)
+
+    oracle_env_spec = get_var('oracle_env', spec, {}) or {}
+    if isinstance(oracle_env_spec, str):
+        try:
+            parsed_env = yaml.safe_load(oracle_env_spec)
+            if isinstance(parsed_env, dict):
+                oracle_env_spec = parsed_env
+            else:
+                oracle_env_spec = {}
+        except Exception:
+            oracle_env_spec = {}
+    elif not isinstance(oracle_env_spec, dict):
+        oracle_env_spec = {}
+
+    default_oracle_env = {
+        'ORACLE_HOME': oracle_home,
+        'ORACLE_SID': oracle_sid,
+        'ORACLE_BASE': '/opt/oracle',
+        'TNS_ADMIN': f"{oracle_home}/network/admin",
+        'PATH': f"{oracle_home}/bin:/usr/local/bin:/usr/bin:/bin:/sbin",
+    }
+
+    oracle_env = {**default_oracle_env, **oracle_env_spec}
     
     log_event(f"[OPERATOR] Oracle DB CR received: name={name}, action={action}, vm_name={vm_name}")
     
@@ -684,9 +727,10 @@ def handle_oracledb(body, meta, spec, status, namespace, diff, old, new, patch, 
 
     try:
         kopf.info(body, reason='Processing', message=f'Starting Oracle DB {action} on VM {vm_name}')
-        playbook_path = "/root/kubernetes-installer/oracle-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'oracle-controller.yaml')
         playbook_vars = {
             'action': action,
+            'kind': kind,
             'vm_name': vm_name,
             'kubevirt_namespace': kubevirt_namespace,
             'oracle_vault_secret': oracle_vault_secret,
@@ -695,7 +739,15 @@ def handle_oracledb(body, meta, spec, status, namespace, diff, old, new, patch, 
             'oracle_admin_password': oracle_admin_password,
             'oracle_sid': oracle_sid,
             'oracle_home': oracle_home,
-            'oracle_port': oracle_port,
+            'oracle_listener_port': oracle_listener_port,
+            'oracle_app_username': oracle_app_username,
+            'oracle_app_grants': oracle_app_grants,
+            'oracle_pdb_name': oracle_pdb_name,
+            'oracle_dbca_template': oracle_dbca_template,
+            'oracle_dbca_memory_mb': oracle_dbca_memory_mb,
+            'skip_system_update': skip_system_update,
+            'oracle_fast_install': oracle_fast_install,
+            'oracle_env': oracle_env,
         }
         
         log_event(f"[OPERATOR] Running Oracle DB playbook for {action} on VM {vm_name}")
@@ -769,7 +821,7 @@ def delete_oracledb(body, meta, spec, status, namespace, patch, **kwargs):
 
     try:
         kopf.info(body, reason='Cleanup', message=f'Starting Oracle DB cleanup on VM {vm_name}')
-        playbook_path = "/root/kubernetes-installer/oracle-controller.yaml"
+        playbook_path = str(REPO_ROOT / 'oracle-controller.yaml')
         playbook_vars = {
             'action': 'uninstall',
             'vm_name': vm_name,

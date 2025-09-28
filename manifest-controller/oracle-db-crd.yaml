@@ -19,6 +19,9 @@ spec:
                 type: string
                 default: install
                 enum: ["install", "uninstall", "status"]
+              kind:
+                type: string
+                default: VirtualMachine
               vm_name:
                 type: string
                 description: "Target VM name for Oracle DB installation"
@@ -43,9 +46,48 @@ spec:
               oracle_home:
                 type: string
                 default: /opt/oracle/product/23ai/dbhomeFree
-              oracle_port:
+              oracle_env:
+                type: object
+                properties:
+                  ORACLE_HOME:
+                    type: string
+                    default: /opt/oracle/product/23ai/dbhomeFree
+                  ORACLE_SID:
+                    type: string
+                    default: FREE
+                  ORACLE_BASE:
+                    type: string
+                    default: /opt/oracle
+                  TNS_ADMIN:
+                    type: string
+                    default: /opt/oracle/product/23ai/dbhomeFree/network/admin
+                  PATH:
+                    type: string
+                    default: "/opt/oracle/product/23ai/dbhomeFree/bin:/usr/local/bin:/usr/bin:/bin:/sbin"
+              oracle_pdb_name:
+                type: string
+                default: FREEPDB1
+              oracle_dbca_template:
+                type: string
+                default: FREE_Database.dbc
+              oracle_dbca_memory_mb:
+                type: integer
+                default: 0
+              oracle_listener_port:
                 type: integer
                 default: 1521
+              oracle_app_username:
+                type: string
+                default: appuser
+              oracle_app_grants:
+                type: string
+                default: "CREATE SESSION, CREATE TABLE, CREATE VIEW, CREATE SEQUENCE, CREATE SYNONYM, UNLIMITED TABLESPACE"
+              oracle_fast_install:
+                type: boolean
+                default: true
+              skip_system_update:
+                type: boolean
+                default: true
             required:
             - vm_name
           status:
@@ -53,7 +95,7 @@ spec:
             properties:
               phase:
                 type: string
-                enum: ["Pending", "InProgress", "Ready", "Failed"]
+                enum: ["Pending", "InProgress", "Ready", "Failed", "Terminating", "Unknown", "Skipped"]
               message:
                 type: string
               reason:

@@ -1,22 +1,33 @@
 ---
-- name: Oracle Database Service Controller
-  hosts: localhost
-  gather_facts: no
-  vars:
-    action: "{{ action | default('status') }}"
-    kind: "{{ kind | default('VirtualMachine') }}"
-    vm_name: "{{ vm_name | default('oracle-vm') }}"
-  tasks:
-    - name: Set playbook path based on action
-      set_fact:
-        playbook_path: >-
-          {% if action == 'install' %}
-            oracle/oracle-db-install.yaml
-          {% elif action == 'uninstall' %}
-            oracle/oracle-db-uninstall.yaml
-          {% else %}
-            oracle/oracle-db-status.yaml
-          {% endif %}
+# Oracle Database Controller
+# Usage examples:
+#   Install:   ansible-playbook oracle-controller.yaml -e oracle_action=install -e vm_name=rhel9-vm -e kubevirt_namespace=default
+#   Uninstall: ansible-playbook oracle-controller.yaml -e oracle_action=uninstall -e vm_name=rhel9-vm -e kubevirt_namespace=default
+#   Status:    ansible-playbook oracle-controller.yaml -e oracle_action=status -e vm_name=rhel9-vm -e kubevirt_namespace=default
+#   Local uninstall: ansible-playbook oracle-controller.yaml -e oracle_action=uninstall -e oracle_local_uninstall=true
 
-    - name: Include the correct playbook
-      include_tasks: "{{ playbook_path }}"
+- hosts: localhost
+  gather_facts: false
+  vars:
+    action_resolved: "{{ oracle_action | default(action | default('status')) }}"  # backward compatibility if 'action' still passed
+    local_uninstall: "{{ oracle_local_uninstall | default(false) }}"
+  tasks:
+    - name: Show resolved parameters
+      debug:
+        msg:
+          - "Action: {{ action_resolved }}"
+          - "vm_name: {{ vm_name | default('') }}"
+          - "kubevirt_namespace: {{ kubevirt_namespace | default('') }}"
+          - "oracle_local_uninstall: {{ local_uninstall }}"
+
+    - name: Validate vm_name for VM actions
+      fail:
+        msg: "vm_name is required for action={{ action_resolved }} (unless oracle_local_uninstall=true)"
+      when: action_resolved in ['install','uninstall','reinstall','status'] and not (local_uninstall | bool) and (vm_name is not defined or vm_name | length == 0)
+
+    - name: Validate kubevirt_namespace for VM actions
+      fail:
+        msg: "kubevirt_namespace is required for action={{ action_resolved }} (unless oracle_local_uninstall=true)"
+      when: action_resolved in ['install','uninstall','reinstall','status'] and not (local_uninstall | bool) and (kubevirt_namespace is not defined or kubevirt_namespace | length == 0)
+
+- import_playbook: "{{ 'oracle/oracle-db-install.yaml' if (oracle_action | default(action | default('status'))) == 'install' else 'oracle/oracle-db-uninstall.yaml' if (oracle_action | default(action | default('status'))) == 'uninstall' else 'oracle/oracle-db-status.yaml' }}"

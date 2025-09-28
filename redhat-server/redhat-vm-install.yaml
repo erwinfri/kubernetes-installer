@@ -453,7 +453,7 @@
                       - resize2fs /dev/vda1
                       - systemctl reload sshd
                       - echo "==== cloud-init runcmd starting ====" | tee -a /var/log/cloudinit-debug.log
-                      - subscription-manager register --username="{{ subscription_username | default('XXXX') }}" --password="{{ subscription_password | default('XXXX') }}" --auto-attach 2>&1 | tee -a /var/log/cloudinit-debug.log
+                      - subscription-manager register --username="{{ subscription_username | default('XXXX') }}" --password="{{ subscription_password | default('XXXX') }}" --auto-attach 2>&1
                       - subscription-manager syspurpose usage --set "{{ syspurpose_usage | default('Development/Test') }}" 2>&1 | tee -a /var/log/cloudinit-debug.log
                       - subscription-manager repos --enable=rhel-9-for-x86_64-baseos-rpms --enable=rhel-9-for-x86_64-appstream-rpms 2>&1 | tee -a /var/log/cloudinit-debug.log
                       - echo "==== cloud-init runcmd finished ====" | tee -a /var/log/cloudinit-debug.log

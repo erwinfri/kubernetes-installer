@@ -6,6 +6,7 @@ import os
 import yaml
 import logging
 from datetime import datetime
+from pathlib import Path
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
@@ -13,11 +14,14 @@ from .utils.k8s_client import get_k8s_client, get_vm_status
 
 logger = logging.getLogger(__name__)
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 class ServiceManager:
     """Manages WindowsVM, MSSQLServer, and OTelCollector resources"""
     
     def __init__(self):
-        self.manifest_dir = "/root/kubernetes-installer/manifest-controller"
+        self.manifest_dir = str(REPO_ROOT / 'manifest-controller')
         
         # Resource definitions
         self.resource_types = {
