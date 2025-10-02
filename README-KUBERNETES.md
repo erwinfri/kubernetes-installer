@@ -195,3 +195,30 @@ virtctl vnc win2025server -n kubevirt
 virtctl console win2019server -n kubevirt
 virtctl console win2025server -n kubevirt
 ```
+
+### OpenTelemetry token separation
+When deploying the OpenTelemetry collector with mixed pipelines (for example Red Hat hosts and Windows VMs), provide a distinct OTLP token for each pipeline. The Windows playbooks no longer inherit the Red Hat or Vault tokens automatically, and the controller now rejects any Windows deployment that reuses an existing pipeline token. Supply the values explicitly, for example:
+
+```bash
+ansible-playbook otel-controller.yaml \
+	-e action=install \
+	-e otel_install_components='["collector","redhat","windows"]' \
+	-e redhat_otel_token=RH_TOKEN_VALUE \
+	-e windows_otel_token=WINDOWS_TOKEN_VALUE
+```
+
+Add additional components as needed. For example, enabling MSSQL telemetry alongside Windows requires separate credentials for that pipeline:
+
+```bash
+ansible-playbook otel-controller.yaml \
+	-e action=install \
+	-e otel_install_components='["collector","windows","mssql"]' \
+	-e windows_otel_token=WINDOWS_TOKEN_VALUE \
+	-e mssql_otel_endpoint="https://your.observe.endpoint/v2/otel" \
+	-e mssql_otel_token=MSSQL_TOKEN_VALUE
+```
+
+Each OTLP destination (Red Hat, Vault, Oracle, Windows, MSSQL, etc.) must provide its own distinct token and (where applicable) endpoint.
+
+### Windows exporter availability check fails
+The installation playbook stops with "Unable to connect to the remote server" when the Windows exporter service never starts (for example, no `/metrics` endpoint on `localhost:9182`). Restart the exporter or re-run the Windows telemetry play before re-running the controller.

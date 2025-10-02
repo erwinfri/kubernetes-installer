@@ -1,12 +1,31 @@
----
 # Tasks to wire Vault metrics into the OTel Collector configuration
+
+- name: Resolve Vault metrics token when unset
+  ansible.builtin.set_fact:
+    vault_metrics_token: "{{ vault_metrics_token_resolved }}"
+  vars:
+    vault_metrics_token_resolved: >-
+      {{
+        (
+          vault_metrics_token | default('', true) | trim | regex_replace('^(?i)none$', '')
+        )
+        or (
+          vault_token | default('', true) | trim | regex_replace('^(?i)none$', '')
+        )
+        or (
+          lookup('file', '/root/.vault-token', errors='ignore') | default('') | trim | regex_replace('^(?i)none$', '')
+        )
+      }}
+  when: vault_metrics_token | default('') | trim | length == 0
+  no_log: true
 
 - name: Validate Vault OTLP configuration
   ansible.builtin.assert:
     that:
       - vault_otel_endpoint | default('') | length > 0
       - vault_otel_token | default('') | length > 0
-    fail_msg: "vault_otel_endpoint and vault_otel_token must be provided to enable Vault metrics."
+      - vault_metrics_token | default('') | length > 0
+    fail_msg: "vault_otel_endpoint, vault_otel_token, and vault_metrics_token must be provided to enable Vault metrics."
 
 - name: Merge Vault metrics pipeline into collector configuration
   ansible.builtin.set_fact:
@@ -23,6 +42,9 @@
                   format: [prometheus]
                 static_configs:
                   - targets: ['vault.default.svc.cluster.local:8200']
+                authorization:
+                  type: Bearer
+                  credentials: "${VAULT_PROMETHEUS_TOKEN}"
                 metric_relabel_configs:
                   - source_labels: [__name__]
                     regex: 'vault_core_unsealed|vault_core_leader|vault_core_active_handles|vault_request_count_total|vault_request_duration_seconds.*|vault_request_errors_total|vault_storage_puts_total|vault_storage_gets_total|vault_storage_list_total|vault_token_create_total|vault_token_revoke_total|vault_auth_method_request_count_total|vault_audit_log_request_count_total|vault_core_standby|process_cpu_seconds_total|process_resident_memory_bytes'
@@ -48,7 +70,8 @@
   ansible.builtin.set_fact:
     otel_env_vars: "{{ otel_env_vars + [
       { 'name': 'VAULT_OTEL_ENDPOINT', 'value': vault_otel_endpoint },
-      { 'name': 'VAULT_OTEL_TOKEN', 'value': vault_otel_token }
+      { 'name': 'VAULT_OTEL_TOKEN', 'value': vault_otel_token },
+      { 'name': 'VAULT_PROMETHEUS_TOKEN', 'value': vault_metrics_token }
     ] }}"
   no_log: true
 

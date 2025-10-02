@@ -27,12 +27,32 @@
     include_windows: "{{ include_windows | default(false) }}"
     include_mssql: "{{ include_mssql | default(false) }}"
 
+- name: Resolve Vault metrics token when component enabled
+  ansible.builtin.set_fact:
+    vault_metrics_token: "{{ vault_metrics_token_resolved }}"
+  vars:
+    vault_metrics_token_resolved: >-
+      {{
+        (
+          vault_metrics_token | default('', true) | trim | regex_replace('^(?i)none$', '')
+        )
+        or (
+          vault_token | default('', true) | trim | regex_replace('^(?i)none$', '')
+        )
+        or (
+          lookup('file', '/root/.vault-token', errors='ignore') | default('') | trim | regex_replace('^(?i)none$', '')
+        )
+      }}
+  when: include_vault | bool
+  no_log: true
+
 - name: Validate Vault inputs when component enabled
   ansible.builtin.assert:
     that:
       - vault_otel_endpoint | default('') | length > 0
       - vault_otel_token | default('') | length > 0
-    fail_msg: "vault_otel_endpoint and vault_otel_token must be provided when enabling the Vault telemetry component."
+      - vault_metrics_token | default('') | length > 0
+    fail_msg: "vault_otel_endpoint, vault_otel_token, and vault_metrics_token must be provided when enabling the Vault telemetry component."
   when: include_vault | bool
 
 - name: Include Vault metrics configuration

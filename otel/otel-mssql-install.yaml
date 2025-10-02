@@ -16,6 +16,17 @@
     fail_msg: "mssql_otel_endpoint and mssql_otel_token are required for the MSSQL telemetry component."
   no_log: true
 
+- name: Ensure MSSQL OTLP token is unique across pipelines
+  ansible.builtin.assert:
+    that:
+      - (windows_otel_token | default('') | length == 0) or (mssql_otel_token != windows_otel_token)
+      - (redhat_otel_token | default('') | length == 0) or (mssql_otel_token != redhat_otel_token)
+      - (vault_otel_token | default('') | length == 0) or (mssql_otel_token != vault_otel_token)
+      - (oracle_otel_token | default('') | length == 0) or (mssql_otel_token != oracle_otel_token)
+    fail_msg: "mssql_otel_token must be unique and must not reuse the OTLP tokens assigned to other telemetry pipelines."
+  when: mssql_otel_token | default('') | length > 0
+  no_log: true
+
 - name: Gather Windows collector metadata for MSSQL pipeline
   ansible.builtin.set_fact:
     mssql_windows_metadata_list: "{{ configured_windows_collectors | default([], true) | selectattr('vm_name', 'equalto', windows_vm_name) | list }}"
@@ -34,12 +45,15 @@
   ansible.builtin.set_fact:
     mssql_collector_slug: "{{ mssql_windows_metadata.slug | default((windows_vm_name | lower | regex_replace('[^a-z0-9]+', '-')) | regex_replace('^-+|-+$', '')) }}"
     mssql_env_prefix: "MSSQL_{{ (windows_vm_name | upper | regex_replace('[^A-Z0-9]+', '_')) }}"
+
+- name: Prepare MSSQL telemetry resource names
+  ansible.builtin.set_fact:
     mssql_env_endpoint_var: "{{ mssql_env_prefix }}_OTEL_ENDPOINT"
     mssql_env_token_var: "{{ mssql_env_prefix }}_OTEL_TOKEN"
     mssql_receiver_name: "prometheus/mssql-{{ mssql_collector_slug }}"
     mssql_exporter_name: "otlphttp/mssql-{{ mssql_collector_slug }}"
     mssql_pipeline_name: "metrics/mssql-{{ mssql_collector_slug }}"
-    mssql_collect_params: ['sql']
+    mssql_collect_params: ['mssql']
 
 - name: Determine MSSQL scrape target
   ansible.builtin.set_fact:
@@ -125,6 +139,6 @@
     msg:
       - "MSSQL telemetry configured for VM '{{ windows_vm_name }}' using Prometheus scrape model"
       - "SQL instance: {{ mssql_instance_name }}"
-      - "Exporter target: http://{{ mssql_collector_address }}:{{ mssql_metrics_port }}/metrics?collect[]=sql"
+      - "Exporter target: http://{{ mssql_collector_address }}:{{ mssql_metrics_port }}/metrics?collect[]=mssql"
       - "Metrics forwarded to: {{ mssql_otel_endpoint }}"
 

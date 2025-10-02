@@ -17,15 +17,64 @@
     fail_msg: "windows_admin_username, windows_otel_endpoint, and windows_otel_token are required for the Windows telemetry component."
   no_log: true
 
+- name: Ensure Windows OTLP token is unique across pipelines
+  ansible.builtin.assert:
+    that:
+      - (redhat_otel_token | default('') | length == 0) or (windows_otel_token != redhat_otel_token)
+      - (vault_otel_token | default('') | length == 0) or (windows_otel_token != vault_otel_token)
+      - (oracle_otel_token | default('') | length == 0) or (windows_otel_token != oracle_otel_token)
+      - (mssql_otel_token | default('') | length == 0) or (windows_otel_token != mssql_otel_token)
+    fail_msg: "windows_otel_token must be unique and must not reuse the OTLP tokens assigned to other telemetry pipelines (redhat, vault, oracle, or mssql)."
+  when: windows_otel_token | default('') | length > 0
+  no_log: true
+
 - name: Set Windows exporter defaults
   ansible.builtin.set_fact:
-    windows_exporter_version: "{{ windows_exporter_version | default('0.24.0') }}"
+    windows_exporter_version: "{{ windows_exporter_version | default('0.31.3') }}"
     windows_exporter_port: "{{ (windows_exporter_port | default(9182)) | int }}"
     enable_sql_collector: "{{ enable_sql_collector | default(false) | bool }}"
+    windows_exporter_metrics_path: "{{ windows_exporter_metrics_path | default('/metrics') }}"
+    windows_exporter_flag_mode: "{{ windows_exporter_flag_mode | default('auto') | lower }}"
+
+- name: Capture Windows extra collectors input
+  ansible.builtin.set_fact:
+    windows_extra_collectors_raw: "{{ windows_extra_collectors | default([]) }}"
+
+- name: Parse Windows extra collectors when provided as string
+  ansible.builtin.set_fact:
+    windows_extra_collectors_list: "{{ windows_extra_collectors_raw | from_yaml }}"
+  when:
+    - windows_extra_collectors_raw is string
+    - windows_extra_collectors_raw | trim | length > 0
+
+- name: Use Windows extra collectors when provided as list
+  ansible.builtin.set_fact:
+    windows_extra_collectors_list: "{{ windows_extra_collectors_raw }}"
+  when:
+    - windows_extra_collectors_raw is sequence
+    - windows_extra_collectors_raw is not string
+
+- name: Ensure Windows extra collectors list structure
+  ansible.builtin.set_fact:
+    windows_extra_collectors_list: "{{ [windows_extra_collectors_list] if windows_extra_collectors_list is string else windows_extra_collectors_list }}"
+  when: windows_extra_collectors_list is defined
+
+- name: Ensure Windows extra collectors default to empty list
+  ansible.builtin.set_fact:
+    windows_extra_collectors_list: "{{ windows_extra_collectors_list | default([]) }}"
 
 - name: Resolve Windows admin password from Vault when needed
   ansible.builtin.set_fact:
-    windows_vault_token_effective: "{{ vault_token if vault_token | default('') | length > 0 else lookup('env', 'VAULT_TOKEN') }}"
+    windows_vault_token_effective: >-
+      {{
+        (vault_token | default('') | trim)
+        if (vault_token | default('') | trim | length > 0)
+        else (
+          (lookup('env', 'VAULT_TOKEN') | default('') | trim)
+          if (lookup('env', 'VAULT_TOKEN') | default('') | trim | length > 0)
+          else (lookup('file', '/root/.vault-token', errors='ignore') | default('') | trim)
+        )
+      }}
   when:
     - windows_admin_password | default('') | length == 0
     - windows_admin_password_vault_path | default('') | length > 0
@@ -85,17 +134,14 @@
   ansible.builtin.set_fact:
     windows_collector_name: "{{ windows_vm_name }}"
     windows_collector_slug: "{{ (windows_vm_name | lower | regex_replace('[^a-z0-9]+', '-') ) | regex_replace('^-+|-+$', '') }}"
-    windows_env_prefix: "WINDOWS_{{ (windows_vm_name | upper | regex_replace('[^A-Z0-9]+', '_')) }}"
-    windows_env_endpoint_var: "{{ windows_env_prefix }}_OTEL_ENDPOINT"
-    windows_env_token_var: "{{ windows_env_prefix }}_OTEL_TOKEN"
+    windows_env_prefix: "{{ windows_env_prefix_value }}"
+    windows_env_endpoint_var: "{{ windows_env_prefix_value }}_OTEL_ENDPOINT"
+    windows_env_token_var: "{{ windows_env_prefix_value }}_OTEL_TOKEN"
     windows_portforward_service: "{{ windows_vm_name }}-winrm-https"
     windows_portforward_log: "/tmp/winrm-{{ windows_vm_name | lower }}-https.log"
     windows_portforward_pid: "/tmp/winrm-{{ windows_vm_name | lower }}-https.pid"
-
-- name: Determine Windows exporter collector sets
-  ansible.builtin.set_fact:
-    windows_collectors_enabled: "{{ (['cpu', 'cs', 'logical_disk', 'net', 'os', 'service', 'system'] + (enable_sql_collector | ternary(['sql'], []))) | list }}"
-    windows_collect_params: ['cpu', 'cs', 'logical_disk', 'net', 'os', 'service', 'system']
+  vars:
+    windows_env_prefix_value: "WINDOWS_{{ windows_vm_name | upper | regex_replace('[^A-Z0-9]+', '_') }}"
 
 - name: Use provided Windows VM address when available
   ansible.builtin.set_fact:
@@ -149,7 +195,7 @@
 
 - name: Confirm WinRM connectivity to Windows VM
   ansible.windows.win_command:
-    command: hostname
+    cmd: hostname
   register: windows_hostname_check
   vars:
     ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
@@ -181,9 +227,8 @@
 
 - name: Compute Windows exporter download paths
   ansible.builtin.set_fact:
-    windows_exporter_download_url: "https://github.com/prometheus-community/windows_exporter/releases/download/v{{ windows_exporter_version }}/windows_exporter-{{ windows_exporter_version }}-amd64.zip"
-    windows_exporter_download_path: "C:\\Data\\temp\\windows_exporter-{{ windows_exporter_version }}-amd64.zip"
-    windows_exporter_extract_path: "C:\\Data\\temp\\windows_exporter_extract"
+    windows_exporter_download_url: "https://github.com/prometheus-community/windows_exporter/releases/download/v{{ windows_exporter_version }}/windows_exporter-{{ windows_exporter_version }}-amd64.exe"
+    windows_exporter_download_path: "C:\\Data\\temp\\windows_exporter-{{ windows_exporter_version }}-amd64.exe"
     windows_exporter_install_dir: "C:\\Data\\windows_exporter"
 
 - name: Download and install Prometheus Windows exporter
@@ -191,7 +236,6 @@
     $ErrorActionPreference = 'Stop'
     $downloadUrl = "{{ windows_exporter_download_url }}"
     $downloadPath = "{{ windows_exporter_download_path }}"
-    $extractPath = "{{ windows_exporter_extract_path }}"
     $installDir = "{{ windows_exporter_install_dir }}"
     $binary = Join-Path $installDir 'windows_exporter.exe'
     $currentVersion = ''
@@ -201,12 +245,8 @@
     }
     if (-not $currentVersion -or -not $currentVersion.StartsWith("{{ windows_exporter_version }}")) {
       Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
-      if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
-      Expand-Archive -LiteralPath $downloadPath -DestinationPath $extractPath -Force
-      $exe = Get-ChildItem -Path $extractPath -Recurse -Filter windows_exporter.exe | Select-Object -First 1
-      if (-not $exe) { throw 'windows_exporter.exe not found after extraction' }
       New-Item -Path $installDir -ItemType Directory -Force | Out-Null
-      Copy-Item -Path $exe.FullName -Destination $binary -Force
+      Copy-Item -Path $downloadPath -Destination $binary -Force
     }
   vars:
     ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
@@ -217,11 +257,91 @@
     ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
     ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
     ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+  changed_when: false
+
+- name: Verify Windows exporter binary availability
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $binary = Join-Path "{{ windows_exporter_install_dir }}" 'windows_exporter.exe'
+    if (-not (Test-Path $binary)) {
+      throw "windows_exporter.exe not found at $binary"
+    }
+    & $binary --version | Out-String
+  register: windows_exporter_version_check
+  changed_when: false
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Normalize Windows exporter version string
+  ansible.builtin.set_fact:
+    windows_exporter_version_normalized: "{{ windows_exporter_version | string | regex_replace('^v', '') }}"
+
+- name: Determine Windows exporter flag mode
+  ansible.builtin.set_fact:
+    windows_exporter_use_web_flags: >-
+      {{
+        (windows_exporter_flag_mode == 'web')
+        or (
+          windows_exporter_flag_mode == 'auto'
+          and (
+            (windows_exporter_version_normalized.split('.')[0] | default('0', true) | int) > 0
+            or (
+              (windows_exporter_version_normalized.split('.')[0] | default('0', true) | int) == 0
+              and (windows_exporter_version_normalized.split('.')[1] | default('0', true) | int) >= 30
+            )
+          )
+        )
+      }}
+
+- name: Determine Windows exporter collector defaults
+  ansible.builtin.set_fact:
+    windows_collectors_base: "{{ windows_exporter_use_web_flags | ternary(['cpu', 'memory', 'logical_disk', 'physical_disk', 'net', 'os', 'service', 'system'], ['cpu', 'cs', 'logical_disk', 'net', 'os', 'service', 'system']) }}"
+
+- name: Determine Windows exporter collector sets
+  ansible.builtin.set_fact:
+    windows_collectors_enabled: "{{ (windows_collectors_base + windows_extra_collectors_list + (enable_sql_collector | ternary(['mssql'], []))) | unique | list }}"
+    windows_collect_params: "{{ (windows_collectors_base + windows_extra_collectors_list + (enable_sql_collector | ternary(['mssql'], []))) | unique | list }}"
+
+- name: Determine Windows exporter CLI flags
+  ansible.builtin.set_fact:
+    windows_exporter_listen_flag: "{{ windows_exporter_use_web_flags | ternary('--web.listen-address', '--telemetry.addr') }}"
+    windows_exporter_metrics_flag: "--telemetry.path"
+
+- name: Debug Windows exporter flag selection
+  ansible.builtin.debug:
+    msg:
+      - "windows_exporter_version: {{ windows_exporter_version }}"
+      - "windows_exporter_version_normalized: {{ windows_exporter_version_normalized }}"
+      - "windows_exporter_flag_mode: {{ windows_exporter_flag_mode }}"
+      - "windows_exporter_use_web_flags: {{ windows_exporter_use_web_flags }}"
+      - "windows_exporter_listen_flag: {{ windows_exporter_listen_flag }}"
+      - "windows_exporter_metrics_flag: {{ windows_exporter_metrics_flag }}"
+  when: otel_windows_debug | default(false)
 
 - name: Prepare Windows exporter service arguments
   ansible.builtin.set_fact:
-    windows_exporter_argument_list: "{{ ['--telemetry.addr=:' ~ windows_exporter_port, '--telemetry.path=/metrics', '--collectors.enabled=' ~ (windows_collectors_enabled | join(','))] + (enable_sql_collector | ternary(['--collector.sql.instances=' ~ mssql_instance_name], [])) }}"
-    windows_exporter_arguments: "{{ windows_exporter_argument_list | join(' ') }}"
+    windows_exporter_argument_list: "{{ windows_exporter_arguments_base }}"
+    windows_exporter_arguments: "{{ windows_exporter_arguments_base | join(' ') }}"
+  vars:
+    windows_exporter_arguments_base: "{{ [
+      windows_exporter_listen_flag ~ '=:' ~ windows_exporter_port,
+      windows_exporter_metrics_flag ~ '=' ~ windows_exporter_metrics_path,
+      '--collectors.enabled=' ~ (windows_collectors_enabled | join(','))
+    ] }}"
+
+- name: Debug Windows exporter argument list
+  ansible.builtin.debug:
+    msg:
+      - "windows_exporter_argument_list: {{ windows_exporter_argument_list }}"
+      - "windows_exporter_arguments: {{ windows_exporter_arguments }}"
+  when: otel_windows_debug | default(false)
 
 - name: Configure Windows exporter service
   ansible.windows.win_shell: |
@@ -239,7 +359,19 @@
       New-Service -Name 'windows_exporter' -BinaryPathName $binPathValue -DisplayName 'Prometheus Windows Exporter' -StartupType Automatic | Out-Null
     }
     Set-Service -Name 'windows_exporter' -StartupType Automatic
-    Start-Service -Name 'windows_exporter'
+    try {
+      Start-Service -Name 'windows_exporter'
+    } catch {
+      $errorMsg = $_.Exception.Message
+      $scQuery = sc.exe query windows_exporter | Out-String
+      $recentEvents = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 5 | Format-List TimeCreated, Id, LevelDisplayName, Message | Out-String
+      try {
+        $exporterEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='windows_exporter'; StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 5 | Format-List TimeCreated, Id, LevelDisplayName, Message | Out-String
+      } catch {
+        $exporterEvents = "Unable to retrieve windows_exporter events: $($_.Exception.Message)"
+      }
+      throw "Failed to start windows_exporter service: $errorMsg`nSC QUERY OUTPUT:`n$scQuery`nService Control Manager events:`n$recentEvents`nwindows_exporter events:`n$exporterEvents"
+    }
   vars:
     ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
     ansible_user: "{{ windows_winrm_connection.ansible_user }}"
@@ -250,14 +382,108 @@
     ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
     ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
 
+- name: Gather windows_exporter service status
+  ansible.windows.win_shell: |
+    sc.exe query windows_exporter | Out-String
+  register: windows_exporter_service_status
+  changed_when: false
+  failed_when: false
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Report windows_exporter service status
+  ansible.builtin.debug:
+    msg: "windows_exporter service status:\n{{ windows_exporter_service_status.stdout | default('no output') }}"
+
+- name: Gather recent windows_exporter events
+  ansible.windows.win_shell: |
+    $start = (Get-Date).AddMinutes(-10)
+    $scmEvents = Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'; StartTime=$start} -MaxEvents 10 | Format-List TimeCreated, Id, LevelDisplayName, Message | Out-String
+    try {
+      $exporterEvents = Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='windows_exporter'; StartTime=$start} -MaxEvents 10 | Format-List TimeCreated, Id, LevelDisplayName, Message | Out-String
+    } catch {
+      $exporterEvents = "Unable to retrieve windows_exporter events: $($_.Exception.Message)"
+    }
+    "Service Control Manager events:\n$scmEvents`nwindows_exporter events:\n$exporterEvents"
+  register: windows_exporter_event_log
+  changed_when: false
+  failed_when: false
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Report windows_exporter recent events
+  ansible.builtin.debug:
+    msg: "{{ windows_exporter_event_log.stdout | default('No recent events captured') }}"
+
+- name: Run windows_exporter diagnostic probe when service stopped
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $binary = Join-Path "{{ windows_exporter_install_dir }}" 'windows_exporter.exe'
+    if (-not (Test-Path $binary)) {
+      throw "windows_exporter.exe missing at $binary"
+    }
+    $arguments = "{{ windows_exporter_arguments }}"
+    $stdoutPath = Join-Path "{{ windows_exporter_install_dir }}" 'windows_exporter-diagnostic-stdout.log'
+    $stderrPath = Join-Path "{{ windows_exporter_install_dir }}" 'windows_exporter-diagnostic-stderr.log'
+    if (Test-Path $stdoutPath) { Remove-Item $stdoutPath -Force }
+    if (Test-Path $stderrPath) { Remove-Item $stderrPath -Force }
+    $proc = Start-Process -FilePath $binary -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    Start-Sleep -Seconds 5
+    if (-not $proc.HasExited) {
+      $proc.Kill()
+      $status = 'stopped after 5-second diagnostic window'
+    } else {
+      $status = "exited with code $($proc.ExitCode)"
+    }
+    $stdout = if (Test-Path $stdoutPath) { Get-Content $stdoutPath | Out-String } else { '' }
+    $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath | Out-String } else { '' }
+    "windows_exporter diagnostic run $status`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
+  register: windows_exporter_diagnostic
+  changed_when: false
+  failed_when: false
+  when:
+    - windows_exporter_service_status.stdout is defined
+    - windows_exporter_service_status.stdout is search('STATE              : 1')
+  vars:
+    ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
+    ansible_user: "{{ windows_winrm_connection.ansible_user }}"
+    ansible_password: "{{ windows_winrm_connection.ansible_password }}"
+    ansible_host: "{{ windows_winrm_connection.ansible_host }}"
+    ansible_winrm_transport: "{{ windows_winrm_connection.ansible_winrm_transport }}"
+    ansible_winrm_server_cert_validation: "{{ windows_winrm_connection.ansible_winrm_server_cert_validation }}"
+    ansible_winrm_port: "{{ windows_winrm_connection.ansible_winrm_port }}"
+    ansible_winrm_scheme: "{{ windows_winrm_connection.ansible_winrm_scheme }}"
+
+- name: Report windows_exporter diagnostic results
+  ansible.builtin.debug:
+    msg: "{{ windows_exporter_diagnostic.stdout | default('Diagnostic run not executed') }}"
+  when:
+    - windows_exporter_service_status.stdout is defined
+    - windows_exporter_service_status.stdout is search('STATE              : 1')
+
 - name: Ensure firewall allows Windows exporter port
-  ansible.windows.win_firewall_rule:
-    name: "Windows Exporter {{ windows_exporter_port }}"
-    localport: "{{ windows_exporter_port }}"
-    action: allow
-    direction: in
-    protocol: tcp
-    state: present
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $ruleName = "Windows Exporter {{ windows_exporter_port }}"
+    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($existing) {
+      Remove-NetFirewallRule -DisplayName $ruleName
+    }
+    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort {{ windows_exporter_port }}
   vars:
     ansible_connection: "{{ windows_winrm_connection.ansible_connection }}"
     ansible_user: "{{ windows_winrm_connection.ansible_user }}"
@@ -373,6 +599,7 @@
   args:
     executable: /bin/bash
   changed_when: false
+  failed_when: false
 
 - name: Show Windows telemetry configuration summary
   ansible.builtin.debug:

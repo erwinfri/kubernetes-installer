@@ -58,7 +58,8 @@
       ansible.builtin.set_fact:
         otel_collector_image: "{{ otel_collector_image | default('otel/opentelemetry-collector-contrib:0.133.0') }}"
         vault_otel_endpoint: "{{ vault_otel_endpoint | default('') }}"
-        vault_otel_token: "{{ vault_otel_token | default('') }}"
+        vault_otel_token: "{{ vault_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
+        vault_metrics_token: "{{ (vault_metrics_token | default('', true) | trim | regex_replace('^(?i)none$', '')) or (vault_token | default('', true) | trim | regex_replace('^(?i)none$', '')) }}"
         oracle_otel_endpoint: "{{ oracle_otel_endpoint | default('') }}"
         oracle_otel_token: "{{ oracle_otel_token | default('') }}"
 
@@ -70,10 +71,10 @@
         windows_admin_username: "{{ windows_admin_username | default('Administrator') }}"
         windows_admin_password: "{{ windows_admin_password | default('') }}"
         windows_admin_password_vault_path: "{{ windows_admin_password_vault_path | default(windows_vault_secret | default(vault_secret | default(''))) }}"
-        windows_otel_endpoint: "{{ windows_otel_endpoint | default('') }}"
-        windows_otel_token: "{{ windows_otel_token | default('') }}"
+        windows_otel_endpoint: "{{ windows_otel_endpoint | default(redhat_otel_endpoint | default(vault_otel_endpoint | default(''))) }}"
+        windows_otel_token: "{{ windows_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
         windows_exporter_port: "{{ windows_exporter_port | default(9182) }}"
-        windows_exporter_version: "{{ windows_exporter_version | default('0.24.0') }}"
+        windows_exporter_version: "{{ windows_exporter_version | default('0.31.3') }}"
         vault_addr: "{{ vault_addr | default('http://localhost:8200') }}"
         vault_token: "{{ vault_token | default('') }}"
         vault_namespace: "{{ vault_namespace | default('') }}"
@@ -86,8 +87,8 @@
         mssql_sa_password_vault_path: "{{ mssql_sa_password_vault_path | default('') }}"
         mssql_sa_username: "{{ mssql_sa_username | default('sa') }}"
         mssql_sa_password: "{{ mssql_sa_password | default('') }}"
-        mssql_otel_endpoint: "{{ mssql_otel_endpoint | default(windows_otel_endpoint | default('')) }}"
-        mssql_otel_token: "{{ mssql_otel_token | default(windows_otel_token | default('')) }}"
+        mssql_otel_endpoint: "{{ mssql_otel_endpoint | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
+        mssql_otel_token: "{{ mssql_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
 
     - name: Align Windows admin username with MSSQL credentials when applicable
       ansible.builtin.set_fact:

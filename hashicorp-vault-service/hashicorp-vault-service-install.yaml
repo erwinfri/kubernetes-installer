@@ -57,6 +57,28 @@
           enabled: false
         extraEnvironmentVars:
           VAULT_LOG_LEVEL: debug
+        extraConfig: |
+          ui = true
+
+          listener "tcp" {
+            tls_disable = 1
+            address = "[::]:8200"
+            cluster_address = "[::]:8201"
+            telemetry {
+              unauthenticated_metrics_access = "true"
+            }
+          }
+
+          storage "file" {
+            path = "/vault/data"
+          }
+
+          telemetry {
+            prometheus_retention_time = "5m"
+            disable_hostname = true
+          }
+
+          disable_mlock = true
       ui:
         enabled: true
       service:
@@ -67,6 +89,48 @@
     helm upgrade --install vault hashicorp/vault --namespace {{ vault_namespace }} -f /tmp/vault-values.yaml
   register: vault_helm_install
   changed_when: vault_helm_install.rc == 0
+
+- name: Ensure Vault configuration enables Prometheus telemetry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: vault-config
+        namespace: "{{ vault_namespace }}"
+        labels:
+          app.kubernetes.io/name: vault
+          app.kubernetes.io/instance: vault
+      data:
+        extraconfig-from-values.hcl: |
+          ui = true
+
+          listener "tcp" {
+            tls_disable = 1
+            address = "[::]:8200"
+            cluster_address = "[::]:8201"
+            telemetry {
+              unauthenticated_metrics_access = "true"
+            }
+          }
+
+          storage "file" {
+            path = "/vault/data"
+          }
+
+          telemetry {
+            prometheus_retention_time = "5m"
+            disable_hostname = true
+          }
+
+          disable_mlock = true
+
+- name: Restart Vault pods to apply configuration changes
+  ansible.builtin.command: kubectl delete pod -l app.kubernetes.io/name=vault -n {{ vault_namespace }} --ignore-not-found
+  register: vault_pod_delete
+  changed_when: vault_pod_delete.rc == 0
+  failed_when: vault_pod_delete.rc not in [0, 1]
 
 - name: Wait for Vault pod to be running (not ready)
   kubernetes.core.k8s_info:
