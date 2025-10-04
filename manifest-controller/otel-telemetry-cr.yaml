@@ -12,7 +12,7 @@ spec:
     replicas: 1
   vault:
     enabled: true
-    otelEndpoint: https://example.observeinc.com/v2/otel
+    otelEndpoint: https://example.com/v2/otel
     otelToken: VAULT_PIPELINE_TOKEN
     metricsToken: VAULT_METRICS_TOKEN
     tokenFile: /root/.vault-token
@@ -20,7 +20,7 @@ spec:
     enabled: true
     vmName: rhel9-vm
     namespace: default
-    otelEndpoint: https://example.observeinc.com/v2/otel
+    otelEndpoint: https://example.com/v2/otel
     otelToken: REDHAT_PIPELINE_TOKEN
     username: redhat
     password: redhat
@@ -29,7 +29,7 @@ spec:
     enabled: true
     vmName: rhel9-vm
     namespace: default
-    otelEndpoint: https://example.observeinc.com/v2/otel
+    otelEndpoint: https://example.com/v2/otel
     otelToken: ORACLE_PIPELINE_TOKEN
     listenerPort: 1521
     pdbName: FREEPDB1
@@ -44,7 +44,7 @@ spec:
     vaultAddr: http://localhost:8200
     vaultToken: VAULT_ACCESS_TOKEN
     vaultNamespace: ""
-    otelEndpoint: https://example.observeinc.com/v2/otel
+    otelEndpoint: https://example.com/v2/otel
     otelToken: WINDOWS_PIPELINE_TOKEN
     exporterPort: 9182
   mssql:
@@ -54,6 +54,6 @@ spec:
     adminPasswordVaultPath: secret/data/windows-server-2025/admin
     saUsername: sa
     saPasswordVaultPath: secret/data/windows-server-2025/admin
-    otelEndpoint: https://example.observeinc.com/v2/otel
+    otelEndpoint: https://example.com/v2/otel
     otelToken: MSSQL_PIPELINE_TOKEN
     windowsRef: windows2025

@@ -63,6 +63,11 @@
   ansible.builtin.set_fact:
     windows_extra_collectors_list: "{{ windows_extra_collectors_list | default([]) }}"
 
+- name: Default Windows admin password Vault path when unset
+  ansible.builtin.set_fact:
+    windows_admin_password_vault_path: "secret/data/windows-server-2025/admin"
+  when: (windows_admin_password_vault_path | default('', true) | trim | length) == 0
+
 - name: Probe Vault connectivity for Windows credential lookup
   ansible.builtin.uri:
     url: "{{ vault_addr | regex_replace('/+$', '') }}/v1/sys/health"

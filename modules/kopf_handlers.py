@@ -345,6 +345,18 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
         local_spec = {name: spec_value} if spec_value is not None else {}
         return get_var(name, local_spec, default)
 
+    def to_bool(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ('1', 'true', 'yes', 'on'):
+            return True
+        if text in ('0', 'false', 'no', 'off'):
+            return False
+        return default
+
     def sanitize_placeholder(value, *placeholders):
         if value is None:
             return value
@@ -356,6 +368,91 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
         if normalized in placeholder_set:
             return ''
         return trimmed
+
+    def apply_env_overrides(playbook_vars, component_string):
+        """Ensure shell exports take precedence even when spec provided placeholders."""
+        override_sources = {
+            'component': ['component', 'otel_install_components'],
+            'otel_namespace': ['otel_namespace'],
+            'redhat_vm_name': ['redhat_vm_name'],
+            'redhat_vm_namespace': ['redhat_vm_namespace'],
+            'redhat_vm_username': ['redhat_vm_username'],
+            'redhat_vm_password': ['redhat_vm_password'],
+            'redhat_otel_endpoint': ['redhat_otel_endpoint'],
+            'redhat_otel_token': ['redhat_otel_token'],
+            'vault_otel_endpoint': ['vault_otel_endpoint'],
+            'vault_otel_token': ['vault_otel_token'],
+            'vault_metrics_token': ['vault_metrics_token'],
+            'vault_token': ['vault_token', 'VAULT_TOKEN'],
+            'vault_token_file': ['vault_token_file'],
+            'oracle_vm_name': ['oracle_vm_name'],
+            'oracle_vm_namespace': ['oracle_vm_namespace'],
+            'oracle_listener_port': ['oracle_listener_port'],
+            'oracle_pdb_name': ['oracle_pdb_name'],
+            'oracle_admin_password': ['oracle_admin_password'],
+            'oracle_otel_endpoint': ['oracle_otel_endpoint'],
+            'oracle_otel_token': ['oracle_otel_token'],
+            'oracle_metrics_username': ['oracle_metrics_username'],
+            'oracle_metrics_password': ['oracle_metrics_password'],
+            'windows_vm_name': ['windows_vm_name'],
+            'windows_vm_namespace': ['windows_vm_namespace'],
+            'windows_admin_username': ['windows_admin_username'],
+            'windows_admin_password': ['windows_admin_password'],
+            'windows_admin_password_vault_path': ['windows_admin_password_vault_path'],
+            'windows_admin_password_vault_field': ['windows_admin_password_vault_field'],
+            'windows_otel_endpoint': ['windows_otel_endpoint'],
+            'windows_otel_token': ['windows_otel_token'],
+            'vault_addr': ['vault_addr', 'VAULT_ADDR'],
+            'vault_namespace': ['vault_namespace', 'VAULT_NAMESPACE'],
+            'vault_validate_certs': ['vault_validate_certs'],
+            'otel_windows_debug': ['otel_windows_debug'],
+            'mssql_otel_endpoint': ['mssql_otel_endpoint'],
+            'mssql_otel_token': ['mssql_otel_token'],
+        }
+        bool_keys = {'vault_validate_certs', 'otel_windows_debug'}
+        applied_keys = []
+
+        def _lookup_env(names):
+            for candidate in names:
+                value = os.environ.get(candidate)
+                if value is None:
+                    value = os.environ.get(candidate.upper())
+                if value is not None and str(value).strip() != '':
+                    return str(value).strip()
+            return None
+
+        for key, names in override_sources.items():
+            env_val = _lookup_env(names)
+            if env_val is None:
+                continue
+            if key in bool_keys:
+                playbook_vars[key] = to_bool(env_val, playbook_vars.get(key))
+            else:
+                playbook_vars[key] = env_val
+            if key not in applied_keys:
+                applied_keys.append(key)
+
+        generic_token = _lookup_env(['otel_token'])
+        if generic_token:
+            token_placeholders = {
+                'redhat_otel_token': {'OTELTOKEN', 'REDHAT_PIPELINE_TOKEN'},
+                'vault_otel_token': {'OTELTOKEN', 'VAULT_PIPELINE_TOKEN'},
+                'oracle_otel_token': {'OTELTOKEN', 'ORACLE_PIPELINE_TOKEN'},
+                'windows_otel_token': {'OTELTOKEN', 'WINDOWS_PIPELINE_TOKEN'},
+                'mssql_otel_token': {'OTELTOKEN', 'MSSQL_PIPELINE_TOKEN'},
+            }
+            for token_key, placeholders in token_placeholders.items():
+                current = playbook_vars.get(token_key)
+                if not isinstance(current, str):
+                    continue
+                if current.strip().upper() in {p.upper() for p in placeholders} and token_key not in applied_keys:
+                    playbook_vars[token_key] = generic_token
+                    applied_keys.append(token_key)
+
+        if playbook_vars.get('component') and component_string != playbook_vars['component']:
+            component_string = playbook_vars['component']
+
+        return applied_keys, component_string
 
     telemetry_namespace = resolve_param('otel_namespace', spec.get('namespace', namespace), spec.get('namespace', namespace))
 
@@ -424,6 +521,7 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
     windows_admin_username = resolve_param('windows_admin_username', windows_cfg.get('adminUsername'), 'Administrator')
     windows_admin_password = resolve_param('windows_admin_password', windows_cfg.get('adminPassword'), '')
     windows_admin_password_vault_path = resolve_param('windows_admin_password_vault_path', windows_cfg.get('adminPasswordVaultPath'), 'secret/data/windows-server-2025/admin')
+    windows_admin_password_vault_field = resolve_param('windows_admin_password_vault_field', windows_cfg.get('adminPasswordVaultField'), 'password')
     windows_otel_endpoint = resolve_param('windows_otel_endpoint', windows_cfg.get('otelEndpoint'), 'OTELENDPOINT')
     windows_otel_token = resolve_param('windows_otel_token', windows_cfg.get('otelToken'), 'OTELTOKEN')
     env_vault_addr = os.environ.get('VAULT_ADDR', '').strip()
@@ -443,8 +541,8 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
     mssql_otel_endpoint = resolve_param('mssql_otel_endpoint', mssql_cfg.get('otelEndpoint'), 'OTELENDPOINT')
     mssql_otel_token = resolve_param('mssql_otel_token', mssql_cfg.get('otelToken'), 'OTELTOKEN')
 
-    otel_windows_debug = bool(resolve_param('otel_windows_debug', windows_cfg.get('debug'), False))
-    vault_validate_certs = bool(resolve_param('vault_validate_certs', windows_cfg.get('vaultValidateCerts'), False))
+    otel_windows_debug = to_bool(resolve_param('otel_windows_debug', windows_cfg.get('debug'), False))
+    vault_validate_certs = to_bool(resolve_param('vault_validate_certs', windows_cfg.get('vaultValidateCerts'), False))
 
     def bool_flag(val):
         return 'yes' if val else 'no'
@@ -457,6 +555,7 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
         f"vault_token_file={vault_token_file}; "
         f"vault_namespace={windows_vault_namespace or '(none)'}; "
         f"windows_admin_password_vault_path={windows_admin_password_vault_path}; "
+    f"windows_admin_password_vault_field={windows_admin_password_vault_field}; "
         f"windows_admin_password_supplied={bool_flag(bool(windows_admin_password))}; "
         f"otel_windows_debug={bool_flag(otel_windows_debug)}"
     )
@@ -490,6 +589,7 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
         'windows_admin_username': windows_admin_username,
         'windows_admin_password': windows_admin_password,
         'windows_admin_password_vault_path': windows_admin_password_vault_path,
+        'windows_admin_password_vault_field': windows_admin_password_vault_field,
         'windows_otel_endpoint': windows_otel_endpoint,
         'windows_otel_token': windows_otel_token,
         'vault_addr': windows_vault_addr,
@@ -500,6 +600,11 @@ def _build_oteltelemetry_playbook(spec, namespace, action):
         'mssql_otel_endpoint': mssql_otel_endpoint,
         'mssql_otel_token': mssql_otel_token,
     }
+
+    applied_env_keys, component_string = apply_env_overrides(playbook_vars, component_string)
+    if applied_env_keys:
+        summary_keys = ', '.join(sorted(applied_env_keys))
+        log_event(f"[OPERATOR] Applied environment overrides for OTel keys: {summary_keys}")
 
     return component_string, playbook_vars
 
@@ -729,9 +834,15 @@ def run_ansible_playbook(playbook_path, variables, stream_to_tui=False):
             elif isinstance(value, (dict, list)):
                 extra_vars_payload[key] = value
             else:
-                extra_vars_payload[key] = str(value)
+                string_value = str(value)
+                if string_value.strip() == '':
+                    continue
+                extra_vars_payload[key] = string_value
 
         if extra_vars_payload:
+            logger.debug(f"[OPERATOR] Prepared Ansible extra-vars: {extra_vars_payload}")
+            if log_queue:
+                log_queue.put(f"[OPERATOR] Prepared Ansible extra-vars: {extra_vars_payload}")
             cmd.extend(['--extra-vars', json.dumps(extra_vars_payload)])
         logger.info(f"[OPERATOR] Running command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
         if log_queue:

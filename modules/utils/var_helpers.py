@@ -16,6 +16,8 @@ EXTRA_VARS = parse_extra_vars()
 import os
 def get_var(name, spec, default=None):
     env_val = os.environ.get(name)
+    if env_val is None or env_val == "":
+        env_val = os.environ.get(name.upper())
     if env_val is not None and env_val != "":
         return env_val
     extra_val = EXTRA_VARS.get(name)
