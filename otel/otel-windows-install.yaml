@@ -63,6 +63,70 @@
   ansible.builtin.set_fact:
     windows_extra_collectors_list: "{{ windows_extra_collectors_list | default([]) }}"
 
+- name: Probe Vault connectivity for Windows credential lookup
+  ansible.builtin.uri:
+    url: "{{ vault_addr | regex_replace('/+$', '') }}/v1/sys/health"
+    method: GET
+    status_code: [200, 202, 204, 429, 472, 473, 503]
+    return_content: false
+    timeout: 5
+  register: windows_vault_health
+  failed_when: false
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+
+- name: Normalize Vault address for Windows credential lookup
+  ansible.builtin.set_fact:
+    windows_vault_addr_normalized: "{{ vault_addr | default('http://localhost:8200') | regex_replace('/+$', '') }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+
+- name: Record Vault health probe status for Windows credentials
+  ansible.builtin.set_fact:
+    windows_vault_health_status: "{{ windows_vault_health.status | default(-1) }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+
+- name: Determine if Vault port-forward is required for Windows credentials
+  ansible.builtin.set_fact:
+    windows_vault_portforward_required: >-
+      {{
+        (windows_vault_health_status | default(-1) | int) == -1
+        and (windows_vault_addr_normalized in ['http://127.0.0.1:8200', 'https://127.0.0.1:8200', 'http://localhost:8200', 'https://localhost:8200'])
+      }}
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+
+- name: Start Vault port-forward for Windows credential lookup
+  ansible.builtin.command:
+    cmd: "{{ playbook_dir }}/library/start_portforward.sh vault 8200 {{ vault_namespace | default('default', true) | default('default') }} {{ windows_vault_portforward_log }} {{ windows_vault_portforward_pid }}"
+  async: 10
+  poll: 0
+  changed_when: false
+  when: windows_vault_portforward_required | default(false)
+  vars:
+    windows_vault_portforward_log: "/tmp/vault-portforward-otel.log"
+    windows_vault_portforward_pid: "/tmp/vault-portforward-otel.pid"
+
+- name: Wait for Vault port-forward readiness
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 8200
+    delay: 2
+    timeout: 30
+  when: windows_vault_portforward_required | default(false)
+
+- name: Mark Vault port-forward as started
+  ansible.builtin.set_fact:
+    windows_vault_portforward_started: true
+    windows_vault_portforward_log: "/tmp/vault-portforward-otel.log"
+    windows_vault_portforward_pid: "/tmp/vault-portforward-otel.pid"
+  when: windows_vault_portforward_required | default(false)
+
 - name: Resolve Windows admin password from Vault when needed
   ansible.builtin.set_fact:
     windows_vault_token_effective: >-
@@ -78,7 +142,14 @@
   when:
     - windows_admin_password | default('') | length == 0
     - windows_admin_password_vault_path | default('') | length > 0
-  no_log: true
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
+
+- name: Determine Vault field for Windows admin password
+  ansible.builtin.set_fact:
+    windows_admin_password_vault_field: "{{ windows_admin_password_vault_field | default('password') }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
 
 - name: Validate Vault parameters for Windows credential lookup
   ansible.builtin.assert:
@@ -89,31 +160,105 @@
   when:
     - windows_admin_password | default('') | length == 0
     - windows_admin_password_vault_path | default('') | length > 0
-  no_log: true
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
 
-- name: Retrieve Windows admin password from Vault
-  ansible.builtin.shell: |
-    vault kv get -field=password {{ windows_admin_password_vault_path }}
-  register: windows_admin_password_lookup
-  changed_when: false
-  environment:
-    VAULT_ADDR: "{{ vault_addr }}"
-    VAULT_TOKEN: "{{ windows_vault_token_effective }}"
-    VAULT_NAMESPACE: "{{ vault_namespace | default('', true) }}"
+- name: Prepare Vault request headers for Windows credential lookup
+  ansible.builtin.set_fact:
+    windows_vault_request_headers:
+      X-Vault-Token: "{{ windows_vault_token_effective }}"
   when:
     - windows_admin_password | default('') | length == 0
     - windows_admin_password_vault_path | default('') | length > 0
-  no_log: true
-  failed_when: windows_admin_password_lookup.rc != 0
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
+
+- name: Add Vault namespace header when provided
+  ansible.builtin.set_fact:
+    windows_vault_request_headers: "{{ windows_vault_request_headers | combine({'X-Vault-Namespace': vault_namespace}) }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+    - vault_namespace | default('') | length > 0
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
+
+- name: Retrieve Windows admin password from Vault
+  ansible.builtin.uri:
+    url: "{{ (windows_vault_addr_normalized | default(vault_addr)) | regex_replace('/+$', '') }}/v1/{{ windows_admin_password_vault_path | regex_replace('^/+', '') }}"
+    method: GET
+    headers: "{{ windows_vault_request_headers }}"
+    status_code: [200, 400, 401, 403, 404, 500]
+    return_content: true
+    validate_certs: "{{ vault_validate_certs | default(false) | bool }}"
+    timeout: 20
+  register: windows_admin_password_lookup
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
+
+- name: Extract Vault payload for Windows credential lookup (KV v2)
+  ansible.builtin.set_fact:
+    windows_admin_password_payload: "{{ (windows_admin_password_lookup.json | default({})).get('data', {}).get('data', {}) }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+    - windows_admin_password_lookup.status | default(0) | int == 200
+    - ((windows_admin_password_lookup.json | default({})).get('data', {}).get('data')) is mapping
+
+- name: Extract Vault payload for Windows credential lookup (KV v1 fallback)
+  ansible.builtin.set_fact:
+    windows_admin_password_payload: "{{ (windows_admin_password_lookup.json | default({})).get('data', {}) }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+    - windows_admin_password_lookup.status | default(0) | int == 200
+    - (windows_admin_password_payload is not defined) or (windows_admin_password_payload | length == 0)
+
+- name: Capture Vault secret keys for diagnostics
+  ansible.builtin.set_fact:
+    windows_admin_password_vault_keys: "{{ (windows_admin_password_payload or {}).keys() | list | sort }}"
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+    - windows_admin_password_payload is defined
+
+- name: Show Vault secret keys when Windows debug enabled
+  ansible.builtin.debug:
+    msg: "Vault secret '{{ windows_admin_password_vault_path }}' keys: {{ windows_admin_password_vault_keys }}"
+  when:
+    - otel_windows_debug | default(false)
+    - windows_admin_password_vault_keys is defined
+
+- name: Surface Vault retrieval failures for Windows credentials
+  ansible.builtin.fail:
+    msg: >-
+      Vault request to '{{ windows_admin_password_vault_path }}' returned HTTP {{ windows_admin_password_lookup.status | default('unknown') }}.
+      Check that the token/namespace grant access and that the secret path exists.
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+    - windows_admin_password_lookup.status | default(0) | int != 200
 
 - name: Set Windows admin password from Vault
   ansible.builtin.set_fact:
-    windows_admin_password: "{{ windows_admin_password_lookup.stdout | trim }}"
+    windows_admin_password: "{{ (windows_admin_password_payload or {}).get(windows_admin_password_vault_field, '') | trim }}"
     windows_admin_password_source: "vault:{{ windows_admin_password_vault_path }}"
   when:
     - windows_admin_password | default('') | length == 0
     - windows_admin_password_vault_path | default('') | length > 0
-  no_log: true
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
+
+- name: Validate password value retrieved from Vault
+  ansible.builtin.assert:
+    that:
+      - windows_admin_password | default('') | length > 0
+    fail_msg: >-
+      Vault secret '{{ windows_admin_password_vault_path }}' did not contain field '{{ windows_admin_password_vault_field }}'.
+      Available keys: {{ windows_admin_password_vault_keys | default([]) }}.
+      Set windows_admin_password_vault_field to the correct field name if the secret uses a different key.
+  when:
+    - windows_admin_password | default('') | length == 0
+    - windows_admin_password_vault_path | default('') | length > 0
+  no_log: "{{ not (otel_windows_debug | default(false)) }}"
 
 - name: Record Windows admin credential source
   ansible.builtin.set_fact:
@@ -600,6 +745,18 @@
     executable: /bin/bash
   changed_when: false
   failed_when: false
+
+- name: Stop Vault port-forward started for Windows credentials
+  ansible.builtin.shell: |
+    if [ -f "{{ windows_vault_portforward_pid }}" ]; then
+      kill $(cat "{{ windows_vault_portforward_pid }}") 2>/dev/null || true
+      rm -f "{{ windows_vault_portforward_pid }}"
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when: windows_vault_portforward_started | default(false)
 
 - name: Show Windows telemetry configuration summary
   ansible.builtin.debug:

@@ -1,2 +1,0 @@
-- name: Run OTel Collector installation workflow
-  ansible.builtin.import_tasks: otel-collector-install.yaml

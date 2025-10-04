@@ -8,12 +8,216 @@
       - windows_vm_namespace | default('') | length > 0
     fail_msg: "windows_vm_name and windows_vm_namespace must be provided when enabling the MSSQL telemetry component."
 
-- name: Assert MSSQL OTLP destination provided
+- name: Assert MSSQL OTLP endpoint provided
   ansible.builtin.assert:
     that:
       - mssql_otel_endpoint | default('') | length > 0
+    fail_msg: "mssql_otel_endpoint is required for the MSSQL telemetry component."
+
+- name: Capture MSSQL OTLP token input
+  ansible.builtin.set_fact:
+    mssql_otel_token_initial: "{{ mssql_otel_token | default('', true) | trim }}"
+  no_log: true
+
+- name: Initialize MSSQL OTLP token from input when provided
+  ansible.builtin.set_fact:
+    mssql_otel_token: "{{ mssql_otel_token_initial }}"
+    mssql_otel_token_source: "input"
+  when: mssql_otel_token_initial | default('') | length > 0
+  no_log: true
+
+- name: Determine Vault usage for MSSQL telemetry
+  ansible.builtin.set_fact:
+    mssql_vault_required: >-
+      {{
+        ((mssql_otel_token_initial | default('') | length == 0) and (mssql_otel_token_vault_path | default('') | length > 0))
+        or ((mssql_admin_password | default('') | length == 0) and (mssql_admin_password_vault_path | default('') | length > 0))
+        or ((mssql_sa_password | default('') | length == 0) and (mssql_sa_password_vault_path | default('') | length > 0))
+      }}
+
+- name: Calculate MSSQL Vault retrieval requirements
+  ansible.builtin.set_fact:
+    mssql_vault_token_required: "{{ (mssql_otel_token_initial | default('') | length == 0) and (mssql_otel_token_vault_path | default('') | length > 0) }}"
+    mssql_admin_password_vault_required: "{{ (mssql_admin_password | default('') | length == 0) and (mssql_admin_password_vault_path | default('') | length > 0) }}"
+    mssql_sa_password_vault_required: "{{ (mssql_sa_password | default('') | length == 0) and (mssql_sa_password_vault_path | default('') | length > 0) }}"
+  no_log: true
+
+- name: Ensure port-forward script exists for MSSQL Vault access
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/library/start_portforward.sh"
+  register: mssql_portforward_script_stat
+  when: mssql_vault_required | bool
+
+- name: Fail if port-forward script is missing for MSSQL Vault access
+  ansible.builtin.fail:
+    msg: "Port-forward script is missing or not executable: {{ playbook_dir }}/library/start_portforward.sh"
+  when:
+    - mssql_vault_required | bool
+    - not mssql_portforward_script_stat.stat.exists or not mssql_portforward_script_stat.stat.mode|int is search('7')
+
+- name: Set MSSQL Vault port-forward artifacts
+  ansible.builtin.set_fact:
+    mssql_vault_portforward_log: "/tmp/vault-portforward-otel-mssql.log"
+    mssql_vault_portforward_pid: "/tmp/vault-portforward-otel-mssql.pid"
+  when: mssql_vault_required | bool
+
+- name: Start Vault port-forward for MSSQL telemetry
+  ansible.builtin.shell: |
+    "{{ playbook_dir }}/library/start_portforward.sh" vault 8200 {{ vault_namespace | default('default', true) | default('default') }} "{{ mssql_vault_portforward_log }}" "{{ mssql_vault_portforward_pid }}"
+    sleep 2
+  args:
+    executable: /bin/bash
+  async: 10
+  poll: 0
+  changed_when: false
+  when: mssql_vault_required | bool
+
+- name: Wait for MSSQL Vault port-forward readiness
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 8200
+    delay: 2
+    timeout: 30
+  when: mssql_vault_required | bool
+
+- name: Resolve MSSQL Vault token
+  ansible.builtin.set_fact:
+    mssql_vault_token_effective: >-
+      {{
+        (vault_token | default('') | trim)
+        if (vault_token | default('') | trim | length > 0)
+        else (
+          (lookup('env', 'VAULT_TOKEN') | default('') | trim)
+          if (lookup('env', 'VAULT_TOKEN') | default('') | trim | length > 0)
+          else (lookup('file', '/root/.vault-token', errors='ignore') | default('') | trim)
+        )
+      }}
+  when: mssql_vault_required | bool
+  no_log: true
+
+- name: Validate MSSQL Vault token availability
+  ansible.builtin.assert:
+    that:
+      - mssql_vault_token_effective | default('') | length > 0
+    fail_msg: "Vault token is required to retrieve MSSQL telemetry secrets. Provide vault_token, set VAULT_TOKEN, or ensure /root/.vault-token exists."
+  when: mssql_vault_required | bool
+  no_log: true
+
+- name: Set MSSQL Vault environment
+  ansible.builtin.set_fact:
+    mssql_vault_env:
+      VAULT_ADDR: "http://127.0.0.1:8200"
+      VAULT_TOKEN: "{{ mssql_vault_token_effective }}"
+      VAULT_NAMESPACE: "{{ vault_namespace | default('', true) }}"
+  when: mssql_vault_required | bool
+  no_log: true
+
+- name: Debug MSSQL Vault gating
+  ansible.builtin.debug:
+    msg:
+      - "mssql_vault_required={{ mssql_vault_required | bool }}"
+      - "mssql_vault_token_required={{ mssql_vault_token_required | default(false) | bool }}"
+      - "mssql_otel_token_initial_length={{ mssql_otel_token_initial | default('') | length }}"
+  when: mssql_vault_required | bool
+
+- name: Retrieve MSSQL OTLP token from Vault
+  ansible.builtin.shell: |
+    vault kv get -field={{ mssql_otel_token_vault_field | default('token') }} {{ mssql_otel_token_vault_path }}
+  environment: "{{ mssql_vault_env }}"
+  register: mssql_otel_token_lookup
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - mssql_vault_token_required | bool
+
+- name: Fail if MSSQL OTLP token lookup failed
+  ansible.builtin.fail:
+    msg: >-
+      Failed to read Vault secret '{{ mssql_otel_token_vault_path }}' field '{{ mssql_otel_token_vault_field | default('token') }}' for mssql_otel_token. Vault returned rc={{ mssql_otel_token_lookup.rc }}.
+  when:
+    - mssql_otel_token_lookup is defined
+    - mssql_otel_token_lookup.rc is defined
+    - mssql_otel_token_lookup.rc != 0
+    - mssql_vault_token_required | bool
+
+- name: Set MSSQL OTLP token from Vault
+  ansible.builtin.set_fact:
+    mssql_otel_token: "{{ mssql_otel_token_lookup.stdout | default('') | trim }}"
+    mssql_otel_token_source: "vault:{{ mssql_otel_token_vault_path }}"
+  when:
+    - mssql_vault_token_required | bool
+    - mssql_otel_token_lookup is defined
+    - (mssql_otel_token_lookup.rc is not defined) or (mssql_otel_token_lookup.rc == 0)
+  no_log: true
+
+- name: Preserve MSSQL OTLP token input after Vault handling
+  ansible.builtin.set_fact:
+    mssql_otel_token: "{{ mssql_otel_token_initial }}"
+    mssql_otel_token_source: "input"
+  when:
+    - mssql_otel_token_initial | default('') | length > 0
+  no_log: true
+
+- name: Retrieve MSSQL admin password from Vault
+  ansible.builtin.shell: |
+    vault kv get -field={{ mssql_admin_password_vault_field | default('password') }} {{ mssql_admin_password_vault_path }}
+  environment: "{{ mssql_vault_env }}"
+  register: mssql_admin_password_lookup
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - mssql_admin_password_vault_required | bool
+
+- name: Fail if MSSQL admin password lookup failed
+  ansible.builtin.fail:
+    msg: >-
+      Failed to read Vault secret '{{ mssql_admin_password_vault_path }}' field '{{ mssql_admin_password_vault_field | default('password') }}' for mssql_admin_password. Vault returned rc={{ mssql_admin_password_lookup.rc }}.
+  when:
+    - mssql_admin_password_lookup is defined
+    - mssql_admin_password_lookup.rc is defined
+    - mssql_admin_password_lookup.rc != 0
+
+- name: Set MSSQL admin password from Vault
+  ansible.builtin.set_fact:
+    mssql_admin_password: "{{ mssql_admin_password_lookup.stdout | default('') | trim }}"
+    mssql_admin_password_source: "vault:{{ mssql_admin_password_vault_path }}"
+  when: mssql_admin_password_lookup is defined
+  no_log: true
+
+- name: Retrieve MSSQL SA password from Vault
+  ansible.builtin.shell: |
+    vault kv get -field={{ mssql_sa_password_vault_field | default('password') }} {{ mssql_sa_password_vault_path }}
+  environment: "{{ mssql_vault_env }}"
+  register: mssql_sa_password_lookup
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when:
+    - mssql_sa_password_vault_required | bool
+
+- name: Fail if MSSQL SA password lookup failed
+  ansible.builtin.fail:
+    msg: >-
+      Failed to read Vault secret '{{ mssql_sa_password_vault_path }}' field '{{ mssql_sa_password_vault_field | default('password') }}' for mssql_sa_password. Vault returned rc={{ mssql_sa_password_lookup.rc }}.
+  when:
+    - mssql_sa_password_lookup is defined
+    - mssql_sa_password_lookup.rc is defined
+    - mssql_sa_password_lookup.rc != 0
+
+- name: Set MSSQL SA password from Vault
+  ansible.builtin.set_fact:
+    mssql_sa_password: "{{ mssql_sa_password_lookup.stdout | default('') | trim }}"
+    mssql_sa_password_source: "vault:{{ mssql_sa_password_vault_path }}"
+  when: mssql_sa_password_lookup is defined
+  no_log: true
+
+- name: Assert MSSQL OTLP token provided
+  ansible.builtin.assert:
+    that:
       - mssql_otel_token | default('') | length > 0
-    fail_msg: "mssql_otel_endpoint and mssql_otel_token are required for the MSSQL telemetry component."
+    fail_msg: "mssql_otel_token is required for the MSSQL telemetry component. Provide it directly or via mssql_otel_token_vault_path."
   no_log: true
 
 - name: Ensure MSSQL OTLP token is unique across pipelines
@@ -26,6 +230,24 @@
     fail_msg: "mssql_otel_token must be unique and must not reuse the OTLP tokens assigned to other telemetry pipelines."
   when: mssql_otel_token | default('') | length > 0
   no_log: true
+
+- name: Probe MSSQL OTLP endpoint authentication
+  ansible.builtin.uri:
+    url: "{{ (mssql_otel_endpoint | regex_replace('/+$', '')) }}/v1/metrics"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ mssql_otel_token }}"
+    status_code: [200, 202, 204, 400, 401, 405, 415]
+    return_content: false
+    timeout: 15
+  register: mssql_otel_probe
+  no_log: true
+
+- name: Assert MSSQL OTLP token is accepted by endpoint
+  ansible.builtin.assert:
+    that:
+      - mssql_otel_probe.status != 401
+    fail_msg: "MSSQL OTLP endpoint rejected the provided token (HTTP 401). Verify mssql_otel_token is valid for {{ (mssql_otel_endpoint | regex_replace('/+$', '')) }}/v1/metrics."
 
 - name: Gather Windows collector metadata for MSSQL pipeline
   ansible.builtin.set_fact:
@@ -133,6 +355,20 @@
       'instance': mssql_instance_name,
       'otel_endpoint': mssql_otel_endpoint
     } ] }}"
+
+- name: Stop Vault port-forward started for MSSQL telemetry
+  ansible.builtin.shell: |
+    if [ -f "{{ mssql_vault_portforward_pid | default('') }}" ]; then
+      kill $(cat "{{ mssql_vault_portforward_pid }}") 2>/dev/null || true
+      rm -f "{{ mssql_vault_portforward_pid }}"
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when:
+    - mssql_vault_required | default(false)
+    - mssql_vault_portforward_pid is defined
 
 - name: Show MSSQL telemetry configuration summary
   ansible.builtin.debug:

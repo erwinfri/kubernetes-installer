@@ -57,22 +57,24 @@
     - name: Normalize OTel controller inputs
       ansible.builtin.set_fact:
         otel_collector_image: "{{ otel_collector_image | default('otel/opentelemetry-collector-contrib:0.133.0') }}"
-        vault_otel_endpoint: "{{ vault_otel_endpoint | default('') }}"
-        vault_otel_token: "{{ vault_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
+        vault_otel_endpoint: "{{ vault_otel_endpoint | default('OTELENDPOINT') }}"
+        vault_otel_token: "{{ vault_otel_token | default('OTELTOKEN', true) | trim | regex_replace('^(?i)none$', '') }}"
         vault_metrics_token: "{{ (vault_metrics_token | default('', true) | trim | regex_replace('^(?i)none$', '')) or (vault_token | default('', true) | trim | regex_replace('^(?i)none$', '')) }}"
-        oracle_otel_endpoint: "{{ oracle_otel_endpoint | default('') }}"
-        oracle_otel_token: "{{ oracle_otel_token | default('') }}"
+        vault_token_file: "{{ vault_token_file | default('/root/.vault-token') }}"
+        vault_token: "{{ vault_token | default(lookup('file', vault_token_file | default('/root/.vault-token'), errors='ignore') | default('', true) | trim, true) }}"
+        oracle_otel_endpoint: "{{ oracle_otel_endpoint | default('OTELENDPOINT') }}"
+        oracle_otel_token: "{{ oracle_otel_token | default('OTELTOKEN') }}"
 
     - name: Default Windows telemetry inputs
       ansible.builtin.set_fact:
-        windows_vm_name: "{{ windows_vm_name | default(vmName | default('')) }}"
+        windows_vm_name: "{{ windows_vm_name | default(vmName | default('windows2025')) }}"
         windows_vm_namespace: "{{ windows_vm_namespace | default(kubevirt_namespace | default('default')) }}"
         windows_vm_address: "{{ windows_vm_address | default('') }}"
         windows_admin_username: "{{ windows_admin_username | default('Administrator') }}"
         windows_admin_password: "{{ windows_admin_password | default('') }}"
-        windows_admin_password_vault_path: "{{ windows_admin_password_vault_path | default(windows_vault_secret | default(vault_secret | default(''))) }}"
-        windows_otel_endpoint: "{{ windows_otel_endpoint | default(redhat_otel_endpoint | default(vault_otel_endpoint | default(''))) }}"
-        windows_otel_token: "{{ windows_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
+        windows_admin_password_vault_path: "{{ windows_admin_password_vault_path | default(windows_vault_secret | default(vault_secret | default('secret/data/windows-server-2025/admin'))) }}"
+        windows_otel_endpoint: "{{ windows_otel_endpoint | default(redhat_otel_endpoint | default(vault_otel_endpoint | default('OTELENDPOINT'))) }}"
+        windows_otel_token: "{{ windows_otel_token | default('OTELTOKEN', true) | trim | regex_replace('^(?i)none$', '') }}"
         windows_exporter_port: "{{ windows_exporter_port | default(9182) }}"
         windows_exporter_version: "{{ windows_exporter_version | default('0.31.3') }}"
         vault_addr: "{{ vault_addr | default('http://localhost:8200') }}"
@@ -87,8 +89,8 @@
         mssql_sa_password_vault_path: "{{ mssql_sa_password_vault_path | default('') }}"
         mssql_sa_username: "{{ mssql_sa_username | default('sa') }}"
         mssql_sa_password: "{{ mssql_sa_password | default('') }}"
-        mssql_otel_endpoint: "{{ mssql_otel_endpoint | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
-        mssql_otel_token: "{{ mssql_otel_token | default('', true) | trim | regex_replace('^(?i)none$', '') }}"
+        mssql_otel_endpoint: "{{ mssql_otel_endpoint | default('OTELENDPOINT', true) | trim | regex_replace('^(?i)none$', '') }}"
+        mssql_otel_token: "{{ mssql_otel_token | default('OTELTOKEN', true) | trim | regex_replace('^(?i)none$', '') }}"
 
     - name: Align Windows admin username with MSSQL credentials when applicable
       ansible.builtin.set_fact:
@@ -99,18 +101,18 @@
 
     - name: Default Red Hat telemetry inputs
       ansible.builtin.set_fact:
-        redhat_vm_name: "{{ redhat_vm_name | default('') }}"
+        redhat_vm_name: "{{ redhat_vm_name | default('rhel9-vm') }}"
         redhat_vm_namespace: "{{ redhat_vm_namespace | default('default') }}"
         redhat_vm_metrics_port: "{{ redhat_vm_metrics_port | default(9100) }}"
         redhat_vm_address: "{{ redhat_vm_address | default('') }}"
-        redhat_vm_username: "{{ redhat_vm_username | default(redhat_user | default('')) }}"
-        redhat_vm_password: "{{ redhat_vm_password | default(user_password | default('')) }}"
-        redhat_otel_endpoint: "{{ redhat_otel_endpoint | default('') }}"
-        redhat_otel_token: "{{ redhat_otel_token | default('') }}"
+        redhat_vm_username: "{{ redhat_vm_username | default(redhat_user | default('redhat')) }}"
+        redhat_vm_password: "{{ redhat_vm_password | default(user_password | default('redhat')) }}"
+        redhat_otel_endpoint: "{{ redhat_otel_endpoint | default('OTELENDPOINT') }}"
+        redhat_otel_token: "{{ redhat_otel_token | default('OTELTOKEN') }}"
 
     - name: Default Oracle telemetry inputs
       ansible.builtin.set_fact:
-        oracle_vm_name: "{{ oracle_vm_name | default('') }}"
+        oracle_vm_name: "{{ oracle_vm_name | default('rhel9-vm') }}"
         oracle_vm_namespace: "{{ oracle_vm_namespace | default(redhat_vm_namespace | default('default')) }}"
         oracle_vm_address: "{{ oracle_vm_address | default('') }}"
         oracle_listener_port: "{{ oracle_listener_port | default(1521) }}"
@@ -118,9 +120,9 @@
         oracle_pdb_name: "{{ oracle_pdb_name | default('FREEPDB1') }}"
         oracle_service_name: "{{ oracle_service_name | default(oracle_pdb_name | default('FREEPDB1')) }}"
         oracle_app_username: "{{ oracle_app_username | default('appuser') }}"
-        oracle_admin_password: "{{ oracle_admin_password | default('') }}"
-        oracle_metrics_username: "{{ oracle_metrics_username | default(oracle_app_username | default('appuser')) }}"
-        oracle_metrics_password: "{{ oracle_metrics_password | default(oracle_admin_password | default('')) }}"
+        oracle_admin_password: "{{ oracle_admin_password | default('Oracle123') }}"
+        oracle_metrics_username: "{{ oracle_metrics_username | default('system') }}"
+        oracle_metrics_password: "{{ oracle_metrics_password | default(oracle_admin_password | default('Oracle123')) }}"
 
     - name: Determine selected OTel components
       ansible.builtin.set_fact:

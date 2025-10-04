@@ -1,0 +1,293 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: oteltelemetries.infra.example.com
+spec:
+  group: infra.example.com
+  scope: Namespaced
+  names:
+    plural: oteltelemetries
+    singular: oteltelemetry
+    kind: OTelTelemetry
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                action:
+                  type: string
+                  description: "Requested action for the telemetry stack"
+                  enum: ["install", "status", "uninstall"]
+                  default: "install"
+                namespace:
+                  type: string
+                  description: "Namespace in which supporting resources are created"
+                  default: "default"
+                componentsSummary:
+                  type: string
+                  description: "Optional summary of components involved in the last reconciliation"
+                collector:
+                  type: object
+                  description: "OpenTelemetry collector configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    image:
+                      type: string
+                      default: "otel/opentelemetry-collector-contrib:0.133.0"
+                    replicas:
+                      type: integer
+                      default: 1
+                    serviceAccount:
+                      type: string
+                    priorityClassName:
+                      type: string
+                vault:
+                  type: object
+                  description: "Vault telemetry pipeline configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: "Enable Vault telemetry pipeline"
+                    otelEndpoint:
+                      type: string
+                      default: "OTELENDPOINT"
+                    otelToken:
+                      type: string
+                      default: "OTELTOKEN"
+                    metricsToken:
+                      type: string
+                      description: "Metrics pipeline token (falls back to vaultToken if omitted)"
+                    token:
+                      type: string
+                      description: "Vault token value to use when accessing Vault-secured resources"
+                    tokenFile:
+                      type: string
+                      description: "Path to file containing a Vault token"
+                      default: "/root/.vault-token"
+                redhat:
+                  type: object
+                  description: "Red Hat VM telemetry configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    vmName:
+                      type: string
+                      default: "rhel9-vm"
+                    namespace:
+                      type: string
+                      default: "default"
+                    otelEndpoint:
+                      type: string
+                      default: "OTELENDPOINT"
+                    otelToken:
+                      type: string
+                      default: "OTELTOKEN"
+                    username:
+                      type: string
+                      description: "Red Hat VM username"
+                      default: "redhat"
+                    password:
+                      type: string
+                      description: "Red Hat VM password"
+                      default: "redhat"
+                    metricsPort:
+                      type: integer
+                      description: "Node exporter metrics port"
+                      default: 9100
+                    address:
+                      type: string
+                      description: "Override VM IP address"
+                oracle:
+                  type: object
+                  description: "Oracle telemetry configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    vmName:
+                      type: string
+                      default: "rhel9-vm"
+                    namespace:
+                      type: string
+                      default: "default"
+                    otelEndpoint:
+                      type: string
+                      default: "OTELENDPOINT"
+                    otelToken:
+                      type: string
+                      default: "OTELTOKEN"
+                    listenerPort:
+                      type: integer
+                      default: 1521
+                    pdbName:
+                      type: string
+                      default: "FREEPDB1"
+                    serviceName:
+                      type: string
+                    appUsername:
+                      type: string
+                    metricsUsername:
+                      type: string
+                      default: "system"
+                    metricsPassword:
+                      type: string
+                      default: "Oracle123"
+                    adminPassword:
+                      type: string
+                      default: "Oracle123"
+                    address:
+                      type: string
+                      description: "Override Oracle VM IP"
+                windows:
+                  type: object
+                  description: "Windows exporter telemetry configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    vmName:
+                      type: string
+                      default: "windows2025"
+                    namespace:
+                      type: string
+                      default: "default"
+                    adminUsername:
+                      type: string
+                      default: "Administrator"
+                    adminPassword:
+                      type: string
+                    adminPasswordVaultPath:
+                      type: string
+                      default: "secret/data/windows-server-2025/admin"
+                    vaultAddr:
+                      type: string
+                      description: "Vault address to retrieve Windows credentials"
+                      default: "http://localhost:8200"
+                    vaultToken:
+                      type: string
+                      description: "Vault token used for Windows credential lookup"
+                    vaultNamespace:
+                      type: string
+                      description: "Vault namespace for Windows credential lookup"
+                      default: ""
+                    otelEndpoint:
+                      type: string
+                      default: "OTELENDPOINT"
+                    otelToken:
+                      type: string
+                      default: "OTELTOKEN"
+                    exporterPort:
+                      type: integer
+                      default: 9182
+                    exporterVersion:
+                      type: string
+                      default: "0.31.3"
+                    collectorAddress:
+                      type: string
+                      description: "Override Windows exporter address"
+                mssql:
+                  type: object
+                  description: "MSSQL telemetry configuration"
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    instanceName:
+                      type: string
+                      default: "MSSQLSERVER"
+                    adminUsername:
+                      type: string
+                      description: "MSSQL admin username"
+                      default: "Administrator"
+                    adminPassword:
+                      type: string
+                    adminPasswordVaultPath:
+                      type: string
+                      default: "secret/data/windows-server-2025/admin"
+                    saUsername:
+                      type: string
+                      default: "sa"
+                    saPassword:
+                      type: string
+                    saPasswordVaultPath:
+                      type: string
+                      default: "secret/data/windows-server-2025/admin"
+                    otelEndpoint:
+                      type: string
+                      default: "OTELENDPOINT"
+                    otelToken:
+                      type: string
+                      default: "OTELTOKEN"
+                    windowsRef:
+                      type: string
+                      description: "Reference to windows.vmName when sharing credentials"
+                    collectorAddress:
+                      type: string
+                      description: "Override Windows exporter address for MSSQL scrape"
+                    metricsPort:
+                      type: integer
+                      description: "Override exporter port"
+              additionalProperties: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current reconciliation phase"
+                message:
+                  type: string
+                reason:
+                  type: string
+                  description: "Reason for the current status phase"
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: "Most recent generation observed by the controller"
+                componentsSummary:
+                  type: string
+                  description: "Summary of components reconciled in the last operation"
+                lastUpdated:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Action
+          type: string
+          jsonPath: .spec.action
+        - name: Namespace
+          type: string
+          jsonPath: .spec.namespace
+        - name: Components
+          type: string
+          jsonPath: .spec.componentsSummary

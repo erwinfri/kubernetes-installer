@@ -67,6 +67,11 @@ RESOURCES = {
         'group': 'infra.example.com',
         'version': 'v1', 
         'plural': 'windowsotelcollectors'
+    },
+    'oteltelemetry': {
+        'group': 'infra.example.com',
+        'version': 'v1',
+        'plural': 'oteltelemetries'
     }
 }
 
@@ -333,6 +338,172 @@ def handle_mssqlserver(body, meta, spec, status, namespace, **kwargs):
         return {'phase': 'Failed', 'message': error_msg}
 
 
+def _build_oteltelemetry_playbook(spec, namespace, action):
+    spec = spec or {}
+
+    def resolve_param(name, spec_value, default=None):
+        local_spec = {name: spec_value} if spec_value is not None else {}
+        return get_var(name, local_spec, default)
+
+    def sanitize_placeholder(value, *placeholders):
+        if value is None:
+            return value
+        trimmed = str(value).strip()
+        if not trimmed:
+            return ''
+        normalized = trimmed.upper()
+        placeholder_set = {p.upper() for p in placeholders if isinstance(p, str)}
+        if normalized in placeholder_set:
+            return ''
+        return trimmed
+
+    telemetry_namespace = resolve_param('otel_namespace', spec.get('namespace', namespace), spec.get('namespace', namespace))
+
+    collector_cfg = spec.get('collector') or {}
+    vault_cfg = spec.get('vault') or {}
+    redhat_cfg = spec.get('redhat') or {}
+    oracle_cfg = spec.get('oracle') or {}
+    windows_cfg = spec.get('windows') or {}
+    mssql_cfg = spec.get('mssql') or {}
+
+    collector_enabled = collector_cfg.get('enabled', True)
+    vault_enabled = vault_cfg.get('enabled', True)
+    redhat_enabled = redhat_cfg.get('enabled', True)
+    oracle_enabled = oracle_cfg.get('enabled', True)
+    windows_enabled = windows_cfg.get('enabled', True)
+    mssql_enabled = mssql_cfg.get('enabled', True)
+
+    component_list = []
+    if collector_enabled:
+        component_list.append('collector')
+    if vault_enabled:
+        component_list.append('vault')
+    if redhat_enabled:
+        component_list.append('redhat')
+    if oracle_enabled:
+        component_list.append('oracle')
+    if windows_enabled:
+        component_list.append('windows')
+    if mssql_enabled:
+        component_list.append('mssql')
+    if not component_list:
+        component_list.append('collector')
+
+    component_string = ','.join(component_list)
+    component_string = resolve_param('component', component_string, component_string)
+
+    redhat_vm_name = resolve_param('redhat_vm_name', redhat_cfg.get('vmName'), 'rhel9-vm')
+    redhat_vm_namespace = resolve_param('redhat_vm_namespace', redhat_cfg.get('namespace'), 'default')
+    redhat_vm_username = resolve_param('redhat_vm_username', redhat_cfg.get('username'), 'redhat')
+    redhat_vm_password = resolve_param('redhat_vm_password', redhat_cfg.get('password'), 'redhat')
+    redhat_otel_endpoint = resolve_param('redhat_otel_endpoint', redhat_cfg.get('otelEndpoint'), 'OTELENDPOINT')
+    redhat_otel_token = resolve_param('redhat_otel_token', redhat_cfg.get('otelToken'), 'OTELTOKEN')
+
+    vault_otel_endpoint = resolve_param('vault_otel_endpoint', vault_cfg.get('otelEndpoint'), 'OTELENDPOINT')
+    vault_otel_token = resolve_param('vault_otel_token', vault_cfg.get('otelToken'), 'OTELTOKEN')
+    vault_metrics_token = resolve_param('vault_metrics_token', vault_cfg.get('metricsToken'), '')
+    vault_token = resolve_param('vault_token', vault_cfg.get('token'), '')
+    vault_token = sanitize_placeholder(vault_token, 'VAULT_ACCESS_TOKEN', 'VAULT_TOKEN', 'TOKEN')
+    vault_token_file = resolve_param('vault_token_file', vault_cfg.get('tokenFile'), '/root/.vault-token')
+    env_vault_token = sanitize_placeholder(os.environ.get('VAULT_TOKEN', ''), 'VAULT_ACCESS_TOKEN', 'VAULT_TOKEN', 'TOKEN')
+    if not vault_token and env_vault_token:
+        vault_token = env_vault_token
+
+    oracle_vm_name = resolve_param('oracle_vm_name', oracle_cfg.get('vmName'), 'rhel9-vm')
+    oracle_vm_namespace = resolve_param('oracle_vm_namespace', oracle_cfg.get('namespace'), 'default')
+    oracle_listener_port = resolve_param('oracle_listener_port', oracle_cfg.get('listenerPort'), 1521)
+    oracle_pdb_name = resolve_param('oracle_pdb_name', oracle_cfg.get('pdbName'), 'FREEPDB1')
+    oracle_admin_password = resolve_param('oracle_admin_password', oracle_cfg.get('adminPassword'), 'Oracle123')
+    oracle_otel_endpoint = resolve_param('oracle_otel_endpoint', oracle_cfg.get('otelEndpoint'), 'OTELENDPOINT')
+    oracle_otel_token = resolve_param('oracle_otel_token', oracle_cfg.get('otelToken'), 'OTELTOKEN')
+    oracle_metrics_username = resolve_param('oracle_metrics_username', oracle_cfg.get('metricsUsername'), 'system')
+    oracle_metrics_password = resolve_param('oracle_metrics_password', oracle_cfg.get('metricsPassword'), 'Oracle123')
+
+    windows_vm_name = resolve_param('windows_vm_name', windows_cfg.get('vmName'), 'windows2025')
+    windows_vm_namespace = resolve_param('windows_vm_namespace', windows_cfg.get('namespace'), 'default')
+    windows_admin_username = resolve_param('windows_admin_username', windows_cfg.get('adminUsername'), 'Administrator')
+    windows_admin_password = resolve_param('windows_admin_password', windows_cfg.get('adminPassword'), '')
+    windows_admin_password_vault_path = resolve_param('windows_admin_password_vault_path', windows_cfg.get('adminPasswordVaultPath'), 'secret/data/windows-server-2025/admin')
+    windows_otel_endpoint = resolve_param('windows_otel_endpoint', windows_cfg.get('otelEndpoint'), 'OTELENDPOINT')
+    windows_otel_token = resolve_param('windows_otel_token', windows_cfg.get('otelToken'), 'OTELTOKEN')
+    env_vault_addr = os.environ.get('VAULT_ADDR', '').strip()
+    windows_vault_addr = resolve_param('vault_addr', windows_cfg.get('vaultAddr'), env_vault_addr or 'http://localhost:8200')
+    windows_vault_addr = sanitize_placeholder(windows_vault_addr) or 'http://localhost:8200'
+    windows_vault_token = resolve_param('vault_token', windows_cfg.get('vaultToken'), '')
+    windows_vault_token = sanitize_placeholder(windows_vault_token, 'VAULT_ACCESS_TOKEN', 'VAULT_TOKEN', 'TOKEN')
+    if not windows_vault_token and vault_token:
+        windows_vault_token = vault_token
+    if not windows_vault_token and env_vault_token:
+        windows_vault_token = env_vault_token
+    windows_vault_namespace = resolve_param('vault_namespace', windows_cfg.get('vaultNamespace'), '')
+    env_vault_namespace = sanitize_placeholder(os.environ.get('VAULT_NAMESPACE', ''))
+    if not windows_vault_namespace and env_vault_namespace:
+        windows_vault_namespace = env_vault_namespace
+
+    mssql_otel_endpoint = resolve_param('mssql_otel_endpoint', mssql_cfg.get('otelEndpoint'), 'OTELENDPOINT')
+    mssql_otel_token = resolve_param('mssql_otel_token', mssql_cfg.get('otelToken'), 'OTELTOKEN')
+
+    otel_windows_debug = bool(resolve_param('otel_windows_debug', windows_cfg.get('debug'), False))
+    vault_validate_certs = bool(resolve_param('vault_validate_certs', windows_cfg.get('vaultValidateCerts'), False))
+
+    def bool_flag(val):
+        return 'yes' if val else 'no'
+
+    log_event(
+        "[OPERATOR] Resolved OTel telemetry inputs: "
+        f"components={component_string}; "
+        f"vault_addr={windows_vault_addr}; "
+        f"vault_token_provided={bool_flag(bool(windows_vault_token))}; "
+        f"vault_token_file={vault_token_file}; "
+        f"vault_namespace={windows_vault_namespace or '(none)'}; "
+        f"windows_admin_password_vault_path={windows_admin_password_vault_path}; "
+        f"windows_admin_password_supplied={bool_flag(bool(windows_admin_password))}; "
+        f"otel_windows_debug={bool_flag(otel_windows_debug)}"
+    )
+
+    playbook_vars = {
+        'action': action,
+        'component': component_string,
+        'otel_namespace': telemetry_namespace,
+        'redhat_vm_name': redhat_vm_name,
+        'redhat_vm_namespace': redhat_vm_namespace,
+        'redhat_vm_username': redhat_vm_username,
+        'redhat_vm_password': redhat_vm_password,
+        'redhat_otel_endpoint': redhat_otel_endpoint,
+        'redhat_otel_token': redhat_otel_token,
+        'vault_otel_endpoint': vault_otel_endpoint,
+        'vault_otel_token': vault_otel_token,
+        'vault_metrics_token': vault_metrics_token,
+    'vault_token': vault_token,
+    'vault_token_file': vault_token_file,
+        'oracle_vm_name': oracle_vm_name,
+        'oracle_vm_namespace': oracle_vm_namespace,
+        'oracle_listener_port': oracle_listener_port,
+        'oracle_pdb_name': oracle_pdb_name,
+        'oracle_admin_password': oracle_admin_password,
+        'oracle_otel_endpoint': oracle_otel_endpoint,
+        'oracle_otel_token': oracle_otel_token,
+        'oracle_metrics_username': oracle_metrics_username,
+        'oracle_metrics_password': oracle_metrics_password,
+        'windows_vm_name': windows_vm_name,
+        'windows_vm_namespace': windows_vm_namespace,
+        'windows_admin_username': windows_admin_username,
+        'windows_admin_password': windows_admin_password,
+        'windows_admin_password_vault_path': windows_admin_password_vault_path,
+        'windows_otel_endpoint': windows_otel_endpoint,
+        'windows_otel_token': windows_otel_token,
+        'vault_addr': windows_vault_addr,
+        'vault_token': windows_vault_token,
+        'vault_namespace': windows_vault_namespace,
+        'vault_validate_certs': vault_validate_certs,
+        'otel_windows_debug': otel_windows_debug,
+        'mssql_otel_endpoint': mssql_otel_endpoint,
+        'mssql_otel_token': mssql_otel_token,
+    }
+
+    return component_string, playbook_vars
+
+
 # OTelCollector Handlers
 @kopf.on.create('infra.example.com', 'v1', 'windowsotelcollectors')
 @kopf.on.update('infra.example.com', 'v1', 'windowsotelcollectors')
@@ -406,6 +577,137 @@ def handle_windowsotelcollector(body, meta, spec, status, namespace, **kwargs):
         log_event(error_msg)
         kopf.exception(body, reason='Error', message=error_msg)
         return {'phase': 'Failed', 'message': error_msg}
+
+
+# OTelTelemetry Handlers (Combined telemetry stack)
+@kopf.on.create('infra.example.com', 'v1', 'oteltelemetries')
+@kopf.on.update('infra.example.com', 'v1', 'oteltelemetries')
+def handle_oteltelemetry(body, meta, spec, status, namespace, diff, old, new, patch, **kwargs):
+    """Handle combined OTel telemetry deployments via otel-controller playbook"""
+
+    terminal_phases = ['Ready', 'Failed', 'Skipped']
+    if status and status.get('phase') in terminal_phases and status.get('observedGeneration') == meta.get('generation'):
+        msg = f"[OPERATOR] Skipping execution for {meta.get('name')} (phase={status.get('phase')})"
+        log_event(msg)
+        return
+
+    name = meta.get('name')
+    action = get_var('action', spec, 'install')
+    component_string, playbook_vars = _build_oteltelemetry_playbook(spec, namespace, action)
+
+    patch.status['phase'] = 'InProgress'
+    patch.status['componentsSummary'] = component_string
+    patch.status['message'] = f"{action.title()} requested for OTelTelemetry {name}"
+    patch.status['reason'] = 'Processing'
+    observed_generation = meta.get('generation')
+    if observed_generation is None and status:
+        observed_generation = status.get('observedGeneration')
+    if observed_generation is not None:
+        patch.status['observedGeneration'] = observed_generation
+
+    try:
+        kopf.info(body, reason='Processing', message=f"Starting {action} for OTel telemetry stack {name}")
+        log_event(f"[OPERATOR] Running otel-controller playbook for {name} with action={action} components={component_string}")
+        playbook_path = str(REPO_ROOT / 'otel-controller.yaml')
+        result = run_ansible_playbook(playbook_path, playbook_vars, stream_to_tui=True)
+        if result['success']:
+            log_event(f"[OPERATOR] OTel telemetry stack {name} {action} completed successfully")
+            patch.status['phase'] = 'Ready'
+            patch.status['message'] = f"OTel telemetry {action} completed successfully"
+            patch.status['reason'] = 'Completed'
+            patch.status['componentsSummary'] = component_string
+            observed_generation = meta.get('generation')
+            if observed_generation is None and status:
+                observed_generation = status.get('observedGeneration')
+            if observed_generation is not None:
+                patch.status['observedGeneration'] = observed_generation
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'True',
+                'reason': 'Completed',
+                'message': patch.status['message'],
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
+        else:
+            error_message = result.get('error', 'unknown failure')
+            log_event(f"[OPERATOR] OTel telemetry stack {name} {action} failed: {error_message}")
+            patch.status['phase'] = 'Failed'
+            patch.status['message'] = f"OTel telemetry {action} failed: {error_message}"
+            patch.status['reason'] = 'Error'
+            patch.status['componentsSummary'] = component_string
+            observed_generation = meta.get('generation')
+            if observed_generation is None and status:
+                observed_generation = status.get('observedGeneration')
+            if observed_generation is not None:
+                patch.status['observedGeneration'] = observed_generation
+            now = datetime.utcnow().isoformat() + 'Z'
+            cond = {
+                'type': 'Ready',
+                'status': 'False',
+                'reason': 'Error',
+                'message': patch.status['message'],
+                'lastTransitionTime': now,
+            }
+            existing = status.get('conditions', []) if status else []
+            patch.status['conditions'] = [c for c in existing if c.get('type') != 'Ready'] + [cond]
+            return
+    except Exception as e:
+        error_msg = f"[OPERATOR] Error processing OTel telemetry {name}: {e}"
+        log_event(error_msg)
+        try:
+            kopf.exception(body, reason='Error', message=error_msg)
+        except Exception as patch_err:
+            log_event(f"[OPERATOR] Failed to patch CR status due to: {patch_err}")
+        patch.status['phase'] = 'Failed'
+        patch.status['message'] = error_msg
+        patch.status['reason'] = 'Exception'
+        patch.status['componentsSummary'] = component_string
+        observed_generation = meta.get('generation')
+        if observed_generation is None and status:
+            observed_generation = status.get('observedGeneration')
+        if observed_generation is not None:
+            patch.status['observedGeneration'] = observed_generation
+        return
+
+
+@kopf.on.delete('infra.example.com', 'v1', 'oteltelemetries')
+def delete_oteltelemetry(body, meta, spec, status, namespace, patch, **kwargs):
+    name = meta.get('name')
+    action = 'uninstall'
+
+    try:
+        component_string, playbook_vars = _build_oteltelemetry_playbook(spec, namespace, action)
+        patch.status['phase'] = 'Terminating'
+        patch.status['message'] = f"Delete requested for OTelTelemetry {name}"
+        patch.status['reason'] = 'DeleteRequested'
+        if component_string:
+            patch.status['componentsSummary'] = component_string
+        elif status and status.get('componentsSummary'):
+            patch.status['componentsSummary'] = status.get('componentsSummary')
+        generation = meta.get('generation')
+        if generation is not None:
+            patch.status['observedGeneration'] = generation
+        kopf.info(body, reason='DeleteRequested', message=f'Starting uninstall for OTel telemetry stack {name}')
+        log_event(f"[OPERATOR] Running otel-controller playbook for uninstall of {name} with components={component_string}")
+        playbook_path = str(REPO_ROOT / 'otel-controller.yaml')
+        result = run_ansible_playbook(playbook_path, playbook_vars, stream_to_tui=True)
+        if result['success']:
+            log_event(f"[OPERATOR] OTel telemetry stack {name} uninstall completed successfully")
+        else:
+            error_message = result.get('error', 'unknown failure')
+            log_event(f"[OPERATOR] OTel telemetry stack {name} uninstall failed: {error_message}")
+    except Exception as e:
+        error_msg = f"[OPERATOR] Error processing OTel telemetry delete {name}: {e}"
+        log_event(error_msg)
+        try:
+            kopf.exception(body, reason='Error', message=error_msg)
+        except Exception as patch_err:
+            log_event(f"[OPERATOR] Failed to patch CR status during delete due to: {patch_err}")
+
 
 def run_ansible_playbook(playbook_path, variables, stream_to_tui=False):
     """Run Ansible playbook with given variables and stream output line by line"""
