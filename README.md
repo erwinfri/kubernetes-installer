@@ -2,6 +2,8 @@
 
 End-to-end automation for building a KubeVirt-based virtual infrastructure on top of a Red Hat Kubernetes stack, provisioning enterprise workloads, and wiring telemetry with OpenTelemetry (OTel).
 
+> **Why this project matters**: It showcases a *native* Kubernetes installation method on Red Hat-based hosts, then layers KubeVirt, Windows/RHEL workloads, and telemetry the same way production teams do it—through manifest-driven, intent-based automation. If you want hands-on experience with declarative infrastructure, CRDs, and fully automated workload onboarding, this repo is your sandbox.
+
 The project combines two complementary entry points:
 
 1. **Controller playbooks** – stand-alone Ansible playbooks that can be run sequentially or individually.
@@ -401,6 +403,150 @@ When these CRs are applied:
 * Add new workloads by creating an Ansible role/playbook and wiring it into a new Kopf handler + CRD.
 * Use `modules/service_managers.py` as a template for orchestrating complex services.
 * For additional telemetry pipelines, extend `otel/` with new includes and adjust `_build_oteltelemetry_playbook`.
+
+## Playbook Deep Dives
+
+### Kubernetes Control Plane Installer (Red Hat)
+
+#### Key capabilities
+
+* Hardens the host by disabling swap/SELinux, installing baseline tooling, and configuring kernel modules for CNI traffic.
+* Bootstraps containerd with `SystemdCgroup` enabled and installs `kubeadm`, `kubelet`, and `kubectl` from the modern `pkgs.k8s.io` repository.
+* Uses `kubeadm init` with a Calico pod network, rewires CoreDNS and kubelet DNS settings, then untaints the control-plane node for single-node labs.
+* Emits a full readiness check (cluster-info, nodes, pods) so you know when the control plane is stable.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as Kubernetes Controller
+    participant Host
+    participant Cluster
+    User->>Playbook: ansible-playbook k8s-redhat-kubernetes-controller.yaml
+    Playbook->>Host: Disable SELinux & firewalld, install base packages
+    Playbook->>Host: Configure kernel modules, sysctl, swap removal
+    Playbook->>Host: Install containerd + kubelet/kubeadm/kubectl
+    Playbook->>Cluster: kubeadm init + Calico network install
+    Playbook->>Cluster: Patch DNS, remove control-plane taint
+    Cluster-->>User: Cluster info, nodes, pods summaries
+```
+
+### KubeVirt & CDI Stack
+
+#### Key capabilities
+
+* Validates that kubelet/containerd are running before touching the virtualization stack.
+* Deploys the upstream KubeVirt operator + CR and waits for virt-api, virt-controller, and virt-handler pods to go `Running`.
+* Installs the matching `virtctl` client, provisions RBAC for console/VNC access, and opens required firewall/iptables rules when `firewalld` is active.
+* Reports installation health and next steps (virtctl, pod checks) once KubeVirt is stitched into the cluster.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as KubeVirt Controller
+    participant Cluster
+    participant Network as Host Firewall
+    User->>Playbook: ansible-playbook k8s-redhat-kubevirt-controller.yaml
+    Playbook->>Cluster: Create namespace & apply operator manifests
+    Playbook->>Cluster: Apply kubevirt-cr.yaml and wait for pods
+    Playbook->>Cluster: Download & install virtctl client
+    Playbook->>Network: Configure firewalld/iptables for KubeVirt traffic
+    Cluster-->>User: virt-* pods running, status summary
+```
+
+### Windows Server Unified Controller
+
+#### Key capabilities
+
+* Seeds Vault with admin credentials, pulls or downloads the Windows evaluation VHDX, and stages VirtIO ISO + sysprep assets.
+* Converts VHDX to RAW, creates local PVs/PVCs, and builds a `VirtualMachine` spec with Autounattend, VirtIO driver automation, WinRM/RDP exposure, and optional SecureBoot toggles.
+* Provisions NodePort/ClusterIP services (VNC, WinRM, RDP) plus sysprep secrets so the VM boots fully configured and ready for automation.
+* Provides post-install guidance (port-forward helpers, Vault retrieval commands) to streamline zero-touch onboarding.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as Windows Controller
+    participant Vault
+    participant Storage
+    participant KubeVirt
+    User->>Playbook: ansible-playbook windows-server-unified-controller.yaml
+    Playbook->>Vault: Ensure policy + admin password secret
+    Playbook->>Storage: Download VHDX & VirtIO ISO, convert to RAW
+    Playbook->>KubeVirt: Create PV/PVCs, sysprep secret, VM CR
+    KubeVirt-->>Playbook: VM status & services (WinRM/RDP/VNC)
+    Playbook-->>User: Access instructions and readiness summary
+```
+
+### Red Hat Enterprise Linux VM Controller
+
+#### Key capabilities
+
+* Validates qcow2 media, optionally self-downloads it, and converts to RAW while resizing to the requested system disk size.
+* Registers the guest with Red Hat Subscription Manager (username/password or Vault), enables BaseOS/AppStream repos, and manages Vault policies/tokens for admin credentials.
+* Creates localized PV/PVC storage, binds them to the node via hostPath, and configures cloud-init to prep SSH users, passwords, and subscription commands.
+* Exposes rich troubleshooting output (Vault state, storage paths, VNC/console commands, VM IP discovery) once the VM transitions to `Running`.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as RHEL Controller
+    participant Vault
+    participant Storage
+    participant KubeVirt
+    User->>Playbook: ansible-playbook redhat-server-controller.yaml
+    Playbook->>Storage: Verify qcow2, create PV/PVC directories
+    Playbook->>Vault: Create policy + token, write admin password
+    Playbook->>KubeVirt: Create RedHat VM CR with cloud-init + subscription
+    KubeVirt-->>Playbook: Report VM phase and interface IP
+    Playbook-->>User: Access commands, subscription status, storage paths
+```
+
+### MSSQL Automation Controller (Windows)
+
+#### Key capabilities
+
+* Port-forwards Vault and WinRM HTTPS, pulling admin/SA credentials securely before orchestrating any remote tasks.
+* Verifies WinRM bindings, seeds required directories, and uploads the MSSQL installer and auxiliary scripts to the Windows guest.
+* Executes unattended SQL Server setup, configures services/firewall, and optionally wires OpenTelemetry exporters based on `otel_config` selections.
+* Provides detailed diagnostics (WinRM tests, service discovery, install logs) to simplify troubleshooting from the Ansible console.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as MSSQL Controller
+    participant Vault
+    participant Windows
+    User->>Playbook: ansible-playbook windows-automation-controller.yaml -e install=mssql
+    Playbook->>Vault: Port-forward & read admin/SA secrets
+    Playbook->>Windows: Establish WinRM over HTTPS
+    Playbook->>Windows: Copy installer + run unattended MSSQL setup
+    Windows-->>Playbook: Return install status & telemetry hooks
+    Playbook-->>User: Log summaries + next-step guidance
+```
+
+### Oracle Database Controller (RHEL)
+
+#### Key capabilities
+
+* Retrieves or seeds Oracle admin credentials in Vault, then validates the target KubeVirt VM is reachable over SSH.
+* Ensures OS prerequisites (groups, packages, directories) are in place, handles Oracle RPM/preinstall checks, and tunes resources for 23ai Free.
+* Runs DBCA automation against the VM, creates listeners/PDBs, and configures application users with the requested grants.
+* Publishes rich status output covering disk/RAM checks, install verification, and Vault integration so you can confidently hand the VM to application teams.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Playbook as Oracle Controller
+    participant Vault
+    participant RHELVM as RHEL VM
+    User->>Playbook: ansible-playbook oracle-controller.yaml -e oracle_action=install
+    Playbook->>Vault: Port-forward & fetch/seed Oracle credentials
+    Playbook->>RHELVM: Validate VM running & reachable
+    Playbook->>RHELVM: Install prerequisites + Oracle RPMs
+    Playbook->>RHELVM: Execute DBCA + postconfig for users/listeners
+    RHELVM-->>Playbook: Report status & listener/DB readiness
+    Playbook-->>User: Resource checks, connection info, Vault paths
+```
 
 ---
 
