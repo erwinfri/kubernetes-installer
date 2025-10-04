@@ -410,7 +410,7 @@ When these CRs are applied:
 
 #### Key capabilities
 
-* Hardens the host by disabling swap/SELinux, installing baseline tooling, and configuring kernel modules for CNI traffic.
+* Disabling swap/SELinux, installing baseline tooling, and configuring kernel modules for CNI traffic.
 * Bootstraps containerd with `SystemdCgroup` enabled and installs `kubeadm`, `kubelet`, and `kubectl` from the modern `pkgs.k8s.io` repository.
 * Uses `kubeadm init` with a Calico pod network, rewires CoreDNS and kubelet DNS settings, then untaints the control-plane node for single-node labs.
 * Emits a full readiness check (cluster-info, nodes, pods) so you know when the control plane is stable.
