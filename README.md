@@ -208,7 +208,13 @@ Once the Windows VM reports `phase=Ready`, you can continue with workload instal
 
 `kopf_opeartor.py` is the unified entry point for the urwid-based console and the Kopf operator workers that reconcile CRDs/CRs.
 
-![Kopf intent-based TUI console](assets/kopf-tui-overview.svg)
+![Kopf TUI overview](assets/kubernetes-installer-kopf-overview.png)
+
+![Manage CRDs from the console](assets/kubernetes-installer-kopf-manage-CRD.png)
+
+![Manage CRs from the console](assets/kubernetes-installer-kopf-manage-CR.png)
+
+![Live playbook and operator logs](assets/kubernetes-installer-kopf-cr-playbook-install-logs.png)
 
 #### Launch the interactive console
 

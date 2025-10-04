@@ -355,15 +355,17 @@ class KubernetesCRDTUI:
                 crd_path = os.path.join(folder, crd_file)
                 crd_name = 'unknown'
                 crd_plural = None
+                crd_singular = None
                 try:
                     with open(crd_path, 'r') as f:
                         crd_content = yaml.safe_load(f)
                     if crd_content and crd_content.get('kind') == 'CustomResourceDefinition':
                         crd_name = crd_content.get('metadata', {}).get('name', 'unknown')
                         crd_plural = crd_content.get('spec', {}).get('names', {}).get('plural', None)
+                        crd_singular = crd_content.get('spec', {}).get('names', {}).get('singular', None)
                 except Exception:
                     pass
-                crd_info[crd_file] = {'name': crd_name, 'plural': crd_plural}
+                crd_info[crd_file] = {'name': crd_name, 'plural': crd_plural, 'singular': crd_singular}
             # Parse CR files for kind mapping
             cr_files_info = []
             for cr_file in cr_files:
@@ -411,6 +413,8 @@ class KubernetesCRDTUI:
                     match = False
                     if crd_plural and cr_info['kind'].lower() == crd_plural.lower():
                         match = True
+                    elif crd_info[crd_file]['singular'] and cr_info['kind'].lower() == crd_info[crd_file]['singular'].lower():
+                        match = True
                     elif crd_name != 'unknown' and cr_info['kind'].lower() in crd_name.lower():
                         match = True
                     if match:
@@ -434,6 +438,7 @@ class KubernetesCRDTUI:
             # Show CRs that did not match any CRD
             unmatched_crs = [cr for cr in cr_files_info if not any(
                 (crd_info[crd_file]['plural'] and cr['kind'].lower() == crd_info[crd_file]['plural'].lower()) or
+                (crd_info[crd_file]['singular'] and cr['kind'].lower() == crd_info[crd_file]['singular'].lower()) or
                 (crd_info[crd_file]['name'] != 'unknown' and cr['kind'].lower() in crd_info[crd_file]['name'].lower())
                 for crd_file in crd_files)]
             if unmatched_crs:
