@@ -11,30 +11,29 @@ The project combines two complementary entry points:
 
 ```mermaid
 flowchart LR
-    subgraph ControlPlane[Kubernetes Control Plane]
-        API[Kubernetes API Server]
-        Kopf[Kopf Operator
-        (modules/kopf_handlers.py)]
+    subgraph ControlPlane["Kubernetes Control Plane"]
+        API["Kubernetes API Server"]
+        Kopf["Kopf Operator<br/>modules/kopf_handlers.py"]
     end
 
-    Ansible[Ansible Controller Playbooks]
+    Ansible["Ansible Controller Playbooks"]
 
     API -->|CRD/CR events| Kopf
     Kopf -->|executes| Ansible
 
-    subgraph Cluster[Kubernetes Cluster]
-        K8s[Kubernetes Installer]
-        KubeVirt[KubeVirt Installer]
-        Vault[HashiCorp Vault Deployment]
-        subgraph VMWorkloads[Virtual Machines]
-            WinVM[Windows Server 2019/2025]
-            RHELVM[Red Hat Enterprise Linux]
+    subgraph Cluster["Kubernetes Cluster"]
+        K8s["Kubernetes Installer"]
+        KubeVirt["KubeVirt Installer"]
+        Vault["HashiCorp Vault Deployment"]
+        subgraph VMWorkloads["Virtual Machines"]
+            WinVM["Windows Server 2019/2025"]
+            RHELVM["Red Hat Enterprise Linux"]
         end
-        subgraph AppLayer[Enterprise Workloads]
-            MSSQL[MSSQL Server 2025]
-            Oracle[Oracle Database 23ai]
+        subgraph AppLayer["Enterprise Workloads"]
+            MSSQL["MSSQL Server 2025"]
+            Oracle["Oracle Database 23ai"]
         end
-        OTel[OpenTelemetry Collectors]
+        OTel["OpenTelemetry Collectors"]
     end
 
     Ansible -->|create/update| Cluster
@@ -64,19 +63,19 @@ The demo environment can run on a single physical or virtual host. The following
 
 ```mermaid
 graph TD
-    Host[Demo Host OS (RHEL / Fedora / CentOS)]
-    Kubelet[Kubelet + Container Runtime]
-    K8sCP[Local Kubernetes Control Plane\n(API Server, etcd, controllers)]
-    K8sWorkers[Kubernetes Worker Services]
-    KubeVirtNS[KubeVirt Namespace\n(virt-controller, virt-api, virt-operator)]
-    CDI[Containerized Data Importer (CDI)]
-    PVCs[PersistentVolumes / PersistentVolumeClaims\n(Windows VHDX, RHEL QCOW)]
-    VirtLauncher[virt-launcher Pods\n(one per VM)]
-    WinVM[Windows Server VM\n(WinRM, MSSQL 2025)]
-    RHELVM[RHEL 9.6 VM\n(Oracle 23ai)]
-    VaultPod[HashiCorp Vault Pods]
-    OTelPods[OTel Collector Deployment]
-    Observe[External Observe/OTLP Backend]
+    Host["Demo Host OS (RHEL / Fedora / CentOS)"]
+    Kubelet["Kubelet + Container Runtime"]
+    K8sCP["Local Kubernetes Control Plane<br/>API Server, etcd, controllers"]
+    K8sWorkers["Kubernetes Worker Services"]
+    KubeVirtNS["KubeVirt Namespace<br/>virt-controller, virt-api, virt-operator"]
+    CDI["Containerized Data Importer (CDI)"]
+    PVCs["PersistentVolumes / PersistentVolumeClaims<br/>Windows VHDX, RHEL QCOW"]
+    VirtLauncher["virt-launcher Pods<br/>one per VM"]
+    WinVM["Windows Server VM<br/>WinRM, MSSQL 2025"]
+    RHELVM["RHEL 9.6 VM<br/>Oracle 23ai"]
+    VaultPod["HashiCorp Vault Pods"]
+    OTelPods["OTel Collector Deployment"]
+    Observe["External Observe/OTLP Backend"]
 
     Host --> Kubelet --> K8sCP
     Kubelet --> K8sWorkers --> KubeVirtNS
