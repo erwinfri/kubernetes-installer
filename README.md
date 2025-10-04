@@ -208,6 +208,8 @@ Once the Windows VM reports `phase=Ready`, you can continue with workload instal
 
 `kopf_opeartor.py` is the unified entry point for the urwid-based console and the Kopf operator workers that reconcile CRDs/CRs.
 
+![Kopf intent-based TUI console](assets/kopf-tui-overview.svg)
+
 #### Launch the interactive console
 
 ```bash
