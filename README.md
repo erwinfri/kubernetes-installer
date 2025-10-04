@@ -4,6 +4,28 @@ End-to-end automation for building a KubeVirt-based virtual infrastructure on to
 
 > **Why this project matters**: It showcases a *native* Kubernetes installation method on Red Hat-based hosts, then layers KubeVirt, Windows/RHEL workloads, and telemetry the same way production teams do it—through manifest-driven, intent-based automation. If you want hands-on experience with declarative infrastructure, CRDs, and fully automated workload onboarding, this repo is your sandbox.
 
+## Context at a Glance
+
+This stack marries upstream Kubernetes running natively on Red Hat-compatible hosts with KubeVirt virtualization so you can operate **containers and virtual machines side-by-side**. Core control-plane services, Vault, and telemetry components run as containers, while Windows Server and RHEL guests execute as full VMs managed by KubeVirt. Both surfaces are reconciled through the same declarative manifests—either via Ansible playbooks or Custom Resources handled by the Kopf operator.
+
+| Platform | Control plane & packaging | Container workloads | VM workloads | Automation approach | Licensing posture |
+| --- | --- | --- | --- | --- | --- |
+| **Kubernetes Installer (this repo)** | Upstream Kubernetes on RHEL/Fedora/CentOS with KubeVirt, CDI, Vault, OTel | Native Kubernetes workloads (operators, collectors, controller pods) | Windows Server 2019/2025, RHEL 9.6 via KubeVirt VMs | Manifest-driven (Ansible playbooks + CRDs/CRs, GitOps-ready) | Community bits + evaluation media (no bundled subscription) |
+| **Red Hat OpenShift + OpenShift Virtualization** | Enterprise Kubernetes distribution with operators, integrated virtualization add-on | Full Kubernetes plus Red Hat curated operators | KubeVirt-based VMs with commercial support | OperatorHub, subscription-backed GitOps pipelines | Requires Red Hat subscription |
+| **VMware vSphere / VCF + Tanzu** | ESXi hypervisor cluster with vCenter management; Tanzu adds Kubernetes namespaces | Tanzu Kubernetes Grid clusters atop ESXi | Native VMs first-class; containers run in supervisor/TKG clusters | UI-driven workflows, PowerCLI, some YAML for Tanzu | Commercial licensing (CPU core/host) |
+| **Proxmox VE** | Debian-based bare-metal virtualization with LXC + QEMU/KVM | LXC containers (not Kubernetes-native) | QEMU/KVM VMs via Proxmox UI/API | Web UI, Terraform/Ansible modules, limited declarative flow | Freemium (enterprise repo subscription optional) |
+| **Microsoft Hyper-V** | Windows Server/Hyper-V role or Hyper-V Server standalone | Containers via Windows Server + Docker/AKS-HCI (separate) | Hyper-V VMs (Windows/Linux) | PowerShell, SCVMM, GUI; manifests limited to ARM templates | Commercial (Windows Server licensing) |
+
+### Container vs. VM workloads in this architecture
+
+| Layer | Example components | Runtime |
+| --- | --- | --- |
+| Kubernetes control plane & operators | API server, etcd, Kopf operator, HashiCorp Vault, OpenTelemetry collector | Containers |
+| Virtualized infrastructure | KubeVirt controllers, CDI importer pods | Containers |
+| Enterprise workloads | Windows Server guests (backing MSSQL), RHEL guests (backing Oracle) | Virtual machines |
+
+Think of it as building a Red Hat-hosted Kubernetes cloud that speaks the same declarative language for both pods and VMs, giving you a single automation story across infrastructure, OS images, and application payloads.
+
 The project combines two complementary entry points:
 
 1. **Controller playbooks** – stand-alone Ansible playbooks that can be run sequentially or individually.
