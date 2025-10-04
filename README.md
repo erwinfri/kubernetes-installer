@@ -155,11 +155,54 @@ ansible-playbook oracle-controller.yaml -e action=install
 ansible-playbook otel-controller.yaml -e action=install -e otel_install_components='["collector","windows","redhat","vault","oracle","mssql"]'
 ```
 
+#### Quickstart: Kubernetes + KubeVirt + Windows VM
+
+The following Bash session demonstrates a minimal deployment path from an empty demo host to a running Windows Server guest. Run the commands from the repository root.
+
+```bash
+# Install the base Red Hat Kubernetes control plane
+ansible-playbook k8s-redhat-kubernetes-controller.yaml \
+    -e k8s_action=install \
+    -e k8s_hostname="demo-control-plane.local"
+
+# Layer on the KubeVirt virtualization stack
+ansible-playbook k8s-redhat-kubevirt-controller.yaml \
+    -e kubevirt_action=install \
+    -e kubevirt_namespace=kubevirt
+
+# (Optional but recommended) Deploy HashiCorp Vault for secret management
+ansible-playbook hashicorp-vault-service-controller.yaml \
+    -e action=install \
+    -e vault_namespace=hashicorp-vault
+
+# Provision a Windows Server 2025 VM image via KubeVirt
+ansible-playbook windows-server-unified-controller.yaml \
+    -e action=install \
+    -e windows_version=2025 \
+    -e vm_name=windows2025 \
+    -e kubevirt_namespace=default \
+    -e windows_admin_password="Str0ngP@ss!" \
+    -e windows_admin_password_vault_path="secret/data/windows-server-2025/admin"
+
+# Verify the VM is up (status play)
+ansible-playbook windows-server-unified-controller.yaml \
+    -e action=status \
+    -e windows_version=2025 \
+    -e vm_name=windows2025
+```
+
+Once the Windows VM reports `phase=Ready`, you can continue with workload installs (for example MSSQL) or enable telemetry using the controllers described below.
+
 **Tips**
 
 * Override any default value with `-e key=value` (for example, `-e windows_admin_password=StrongP@ss1`).
 * Provide unique OTLP tokens per pipeline (`windows_otel_token`, `redhat_otel_token`, etc.).
 * Vault integration expects either `vault_token` or a readable token file; see the playbook docstrings for details.
+
+#### Installer Highlights
+
+* **Red Hat Server automation** – the `redhat-server-controller.yaml` pipeline walks a RHEL image from raw media to a subscribed, Vault-backed guest. When you supply `subscription_username` / `subscription_password` (either via extra vars or environment), the playbook registers the VM with `subscription-manager`, auto-attaches the right repositories, enables the AppStream/BaseOS channels, and seeds Vault with the admin password policy. You can even flip on EFI boot, auto-convert QCOW ➜ RAW, and let it mint local PV/PVC storage on the fly.
+* **Windows zero-touch build** – the unified Windows controller layers Autounattend + sysprep secrets, downloads (or reuses) the Microsoft evaluation VHDX, stages VirtIO media, and injects a PowerShell driver bundle so pnputil/DISM bring every virtio driver online—including NetKVM, storage, RNG, ballooning, GPU, serial, and WinRM HTTPS. When the VM boots it already has WinRM/RDP enabled, Vault-backed credentials, firewall holes opened, and NodePort/ClusterIP services created—so you get an on-prem “cloud-like” Windows experience without ever opening the console.
 
 ### 2. Kopf Operator & TUI Console
 
@@ -256,9 +299,9 @@ Provide per-component endpoints/tokens when installing:
 ansible-playbook otel-controller.yaml \
   -e action=install \
   -e component="collector,windows,mssql" \
-  -e windows_otel_endpoint="https://observe.example.com/v2/otel" \
+  -e windows_otel_endpoint="https://telemetry.example.com/v2/otel" \
   -e windows_otel_token="WINDOWS_TOKEN" \
-  -e mssql_otel_endpoint="https://observe.example.com/v2/otel" \
+  -e mssql_otel_endpoint="https://telemetry.example.com/v2/otel" \
   -e mssql_otel_token="MSSQL_TOKEN"
 ```
 
@@ -326,8 +369,8 @@ When these CRs are applied:
 
 * Control host with Ansible 2.14+ and Python 3.9+.
 * Access to a Red Hat-compatible Kubernetes cluster (for example, OpenShift or ROSA) with cluster-admin privileges.
-* Proper Red Hat / Microsoft / Oracle licensing or evaluation media.
-* Optional: Observe/OTel backend credentials for telemetry ingestion.
+* Red Hat / Trial Microsoft / Oracle Developer / Trial licensing or evaluation media.
+* Optional: Telemetry/OTel backend credentials for telemetry ingestion.
 
 ## Operational Guidelines
 
@@ -344,7 +387,6 @@ When these CRs are applied:
 | Windows VM fails to retrieve password | Missing Vault token or incorrect secret field | Supply `vault_token` / `VAULT_TOKEN`, or ensure the secret path contains the `password` key |
 | MSSQL/Oracle installers hang on WinRM/SSH | VM not ready or credentials incorrect | Check VM status via `virtctl console` / `kubectl get vmi`, review playbook logs |
 | OTel components complain about duplicate tokens | Shared OTLP token across pipelines | Provide unique `*_otel_token` values per pipeline |
-| Stuck VM deletion | Finalizer not removed or VM offline | Use `./cleanup-stuck-vm.sh` to clear leftovers |
 
 ## Extending the Platform
 
